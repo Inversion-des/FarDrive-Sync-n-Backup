@@ -1,3 +1,7 @@
+# FarDrive Sync&Backup
+# Copyright © 2021 Yura Babak (yura.des@gmail.com, https://www.facebook.com/yura.babak, https://www.linkedin.com/in/yuriybabak)
+# License: GNU GPL v3.0 (https://www.gnu.org/licenses/gpl-3.0.html)
+
 class Storage
 	C_storage_dir_name ||= 'FarDrive_storage'   # can be already defined in tests
 	C_input_mutex = Mutex.new
