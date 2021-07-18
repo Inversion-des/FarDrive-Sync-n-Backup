@@ -1,0 +1,21 @@
+# bundle install --without dev
+# bundle install --without dev --deployment
+# bundle install --without dev --deployment  --path platform/Ruby_gems
+source 'https://rubygems.org'
+
+gem 'win32-file-attributes'
+gem 'seven_zip_ruby'
+gem 'win32-process'
+
+gem 'google_drive', github: 'Inversion-des/google-drive-ruby'
+# https://github.com/Inversion-des/google-drive-ruby
+# using until this pull request not accepted (or any other needed changes) — https://github.com/gimite/google-drive-ruby/pull/406
+# last review — 16.06.21
+
+
+# bundle install --with dev
+# bundle install --with dev --deployment
+group :dev, optional: true do
+	gem 'rspec'
+	gem 'timecop'
+end
