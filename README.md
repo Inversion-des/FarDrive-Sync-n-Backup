@@ -1,6 +1,10 @@
 # FarDrive Sync&Backup
 A small but powerful sync/backup tool.
-> ⚠ Right now the project is in the early proof of concept stage. Works only on Windows with limited functionality.
+> ⚠ Right now the project is in the early proof of concept stage.  
+> Works only on Windows with limited functionality.
+
+## But why?
+Why make another sync/backup tool when there are plenty of them around? Well, [here is my story…](https://docs.google.com/document/d/1cHQa4rnZV1vFlTQKOPIuLwMakY5mg4lQHs5MwKw05Cs/edit)
 
 ## How to test a simple backup/restore scenario:
 
@@ -17,7 +21,8 @@ The simples storage config looks like:
 	}
 }
 ```
-5. Now in the main dir you can run cmd and do `run -up` and `run -down`. Special `.db` dir will be added to the backup dir (`@local_1`).
+5. Now in the main dir you can open cmd and do `run -up` and `run -down`.  
+A special `.db` dir will be added to the backup dir (`@local_1`) initially.
 
 
 ## I need more
@@ -38,3 +43,5 @@ And then use `run -update_filter` once to save the filter for the current backup
 ## Community
 If you have any questions/feedback — welcome to [Discussions](https://github.com/Inversion-des/FarDrive-Sync-n-Backup/discussions) and our [Subreddit](https://www.reddit.com/r/FarDrive_SyncBackup/).  
 Any issues — welcome to [Issues](https://github.com/Inversion-des/FarDrive-Sync-n-Backup/issues).
+
+If you like the concept and would like to support the development — here is [my Patreon](https://www.patreon.com/inve).
