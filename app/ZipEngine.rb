@@ -164,10 +164,11 @@ class Ruby7Zip < ZipEngine
 		@file.binwrite data
 		@cache_data_by_fp.clear
 	end
+	# -size -factor -k
 	def size
 		# *solid archive result is usually smaller, so here we try to estimate real final size
 		#  tried to add dependance from files count but it caused sometimes that total size decreased after adding some small file and the pack calibration logic was broken
-		return @size.div 1.2
+		return @size.div 1.1
 	end
 	# cls.new(fp:'db2.7z').pack_dir dir_or_path
 	def pack_dir(path)

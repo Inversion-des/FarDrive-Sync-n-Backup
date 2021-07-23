@@ -192,6 +192,12 @@ class App
 	def init
 		DirDB.prod!
 		# $>.sync = true  # *realtime log (slower processing)
+		Thread.new do
+			loop do
+				$>.flush
+				sleep 3
+			end
+		end
 		puts
 		puts '=== ' + Time.now.to_s + ' ' + '='*45  # date marker
 

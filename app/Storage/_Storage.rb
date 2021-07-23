@@ -33,7 +33,11 @@ class Storage
 				files[from].reject do |file|
 					# skip if such file exists
 					if found_file=files[to].find_by(name:file.name)
-						found_file.mtime == file.mtime
+						#. *on clouds mtime is not the original so we cannot rely on it
+						#  maybe we should have some mtime_preserved flag for storage
+						# found_file.mtime == file.mtime
+						# *risky: what if content is different?
+						found_file.size == file.size
 					end
 				end
 			del_files =
@@ -44,7 +48,9 @@ class Storage
 			# *delete first to free up storage and to define a storage_dir
 			to.del_many del_files
 		
-			tmp_dir = IDir.new(:z_tmp_sync).create   # dir is usually created in the project local dir
+			# *'z_tmp_sync' added to Shared.skip_root_nodes
+			# *we do not use tmp files if reading from LocalFS
+			tmp_dir = from.is_a?(LocalFS) ? nil : IDir.new(:z_tmp_sync).create   # dir is usually created in the project local dir
 			from.do_in_parallel(tasks:add_files) do |add_file|
 				file = from.get(add_file.name, to:tmp_dir)
 				to.add_update file
@@ -67,11 +73,26 @@ class Storage
 	def mode
 		Shared.mode || :up
 	end
-
-	# api stub
-	def add_update(file)
-		fail 'NotImplemented'
+	def with_long_call_warns(title:nil)
+		# *log warn about long operation
+		thread = Thread.new do
+			sleep 20.mins
+			print "[#{title} took 20 mins]"
+			sleep 20.mins
+			print "[#{title} took 40 mins]"
+		end
+		yield
+	ensure
+		thread.kill
 	end
+
+	#-- api stubs
+	def add_update(file)
+		with_long_call_warns title:"add_update - #{file.name}" do
+			yield
+		end
+	end
+
 	def add_update_many(files)
 		do_in_parallel(tasks:files) do |file|
 			add_update file
@@ -80,10 +101,14 @@ class Storage
 	end
 
 	def get(name, to:nil)
-		to_file = to.is_a?(IDir) ? to/name : IFile.new(to)
-		fail 'NotImplemented'
-		to_file
+		with_long_call_warns title:"get - #{name}" do
+			if to
+				to_file = to.is_a?(IDir) ? to/name : IFile.new(to)
+			end
+			yield to_file
+		end
 	end
+
 	def get_many(names, to_dir:nil)
 		do_in_parallel(tasks:names) do |name|
 			get(name, to:to_dir)
@@ -137,7 +162,9 @@ class Storage::LocalFS < Storage
 	end
 
 	def add_update(file)
-		file.copy_to storage_dir
+		super do
+			file.copy_to storage_dir
+		end
 	end
 	def add_update_many(files)
 		# *not in parallel
@@ -147,11 +174,17 @@ class Storage::LocalFS < Storage
 		end
 	end
 
+	# *return ori file if to: not provided (optimization to avoid creating temp files)
 	def get(name, to:nil)
-		to_file = to.is_a?(IDir) ? to/name : IFile.new(to)
-		file = storage_dir/name
-		file >> to_file
-		to_file
+		super do |to_file|
+			file = storage_dir/name
+			if to
+				file >> to_file
+				to_file
+			else
+				file
+			end
+		end
 	end
 
 	def del(name)
@@ -262,21 +295,36 @@ class Storage::GoogleDrive < Storage
 	end
 
 	def add_update(file)
-		if stored_file=storage_dir.file_by_title(file.name)
-			stored_file.update_from_file file.abs_path
-		else
-			# *allows to upload files with the same name
-			# upload_from_io(io, title = 'Untitled', params = {})
-			storage_dir.upload_from_file(file.abs_path, nil, convert:false)
+		super do
+			if stored_file=storage_dir.file_by_title(file.name)
+				stored_file.update_from_file file.abs_path
+			else
+				# *allows to upload files with the same name
+				# upload_from_io(io, title = 'Untitled', params = {})
+				storage_dir.upload_from_file(file.abs_path, nil, convert:false)
+			end
+		# *too many different errors: HTTPClient::KeepAliveDisconnected, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ENETUNREACH, Google::Apis::TransmissionError, SocketError
+		rescue
+			attempt ||= 0
+			attempt += 1
+			# retry for 1 hour
+			if attempt <= 360
+				sleep 10
+				# *log error type
+				print "[add_update retry - #{$!.inspect}]"
+				retry
+			end
+			raise
 		end
 	end
 
 	def get(name, to:nil)
-		to_file = to.is_a?(IDir) ? to/name : IFile.new(to)
-		file = storage_dir.file_by_title name
-		raise KnownError, "(GoogleDrive - #{@account}) file not found: #{name}" if !file
-		file.download_to_file to_file.to_s
-		to_file
+		super do |to_file|
+			file = storage_dir.file_by_title name
+			raise KnownError, "(GoogleDrive - #{@account}) file not found: #{name}" if !file
+			file.download_to_file to_file.to_s
+			to_file
+		end
 	end
 
 	def del(name)
@@ -326,9 +374,13 @@ class Storage::GoogleDrive < Storage
 	end
 
 	def files
-		storage_dir.files
-			.reject {|_| _.name == C_warn_dir_name }
-			.each {|_| _.extend FileExt }
+		arr = []
+		# *without block it returns only first 100 items
+		storage_dir.files do |_|
+			next if _.name == C_warn_dir_name
+			arr << _.extend(FileExt)
+		end
+		arr
 	end
 
 	def create_dir(name)

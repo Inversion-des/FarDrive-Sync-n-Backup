@@ -222,7 +222,7 @@ class Sync
 		@tree_data = @db.tree_data
 		Chunk.set_db @db.data_by_file_key
 		@tmp_dir = IDir.new 'z_tmp'
-		Shared.skip_root_nodes = [@db.dir, @tmp_dir.name, 'w.txt']
+		Shared.skip_root_nodes = [@db.dir, @tmp_dir.name, 'w.txt', 'z_tmp_sync', 'z_tmp_fast_one']
 		controller
 	end
 
@@ -2151,6 +2151,7 @@ class StorageHelper
 		@fast_one ||= begin
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+			# *added to Shared.skip_root_nodes
 			tmp_dir = (@sync.start_dir/:z_tmp_fast_one).create
 			arr = []
 			n = 0
