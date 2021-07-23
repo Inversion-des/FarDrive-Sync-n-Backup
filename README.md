@@ -9,7 +9,7 @@ Why make another sync/backup tool when there are plenty of them around? Well, [h
 ## How to test a simple backup/restore scenario:
 
 1. Ensure you are on Windows.
-1. Download and unpack [the latest release](https://github.com/Inversion-des/FarDrive-Sync-n-Backup/releases) (8 MB) or clone the repo.
+1. Download and unpack [the latest release](https://github.com/Inversion-des/FarDrive-Sync-n-Backup/releases/latest) (8 MB) or clone the repo.
 1. In the `app` dir, copy `app_sample.rb` and rename to `app.rb`.
 1. Edit `app.rb`:  
 Define `@local_1`, `@local_2` and `@storages`.  
