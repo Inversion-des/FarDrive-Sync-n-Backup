@@ -6,7 +6,7 @@ class App
 	def initialize
 		# ------- main setup ---------------------
 
-		# dir to backup
+		# dir to backup (also in this file you can find "multiple dirs sample")
 		@local_1 = 'D:/my_projects'
 
 		# dir to restore on this or other machine
@@ -209,6 +209,12 @@ class App
 	def sync
 		@sync ||= Sync.new(
 			local: @local || @local_1,
+			# *for .down we ensure that set_dir will be not the same as for .up
+			set_mod: @local==@local_2 ? '(2)' : '',
+			# multiple dirs sample
+#			local:
+#				dir_1: 'C:/path/to/dir_1'
+#				dir_2: 'D:/path/to/dir_2'
 			conf: {
 				# default: 5 MB
 				pack_max_size_bytes: 10.MB

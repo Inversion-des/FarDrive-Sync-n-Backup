@@ -135,7 +135,7 @@ class IPath
 	attr :base, :pn, :d
 																																							#~ IPath\
 	# IDir.new(:z_tmp_sync).create
-	# base — Pathname | string
+	# base — Pathname | string | true
 	def initialize(_path, base:nil)
 		# *make path resolved in the current pwd (so dir will be the same even after chdir)
 		# - .realpath will fail if path doesn't exist
@@ -149,10 +149,10 @@ class IPath
 				if _path.is_a? Symbol
 					_path = _path.to_s.encode 'UTF-8'
 				end
-				if base&.is_a? Pathname
+				if base&.is_a?(Pathname) || base&.is_a?(IPath)
 					base+_path
 				elsif base&.string?
-					Pathname.new(base+'/'+_path)
+					Pathname.new(_path == '.' ? base : base+'/'+_path)
 				else
 					Pathname.new(File.absolute_path _path)
 				end
@@ -423,6 +423,17 @@ class IDir < IPath
 	end
 	alias :/ +
 
+	# -get subdir -[
+	# dir[:sub].mtime
+	# @dir_local_2['.db/sets/#def_set'] << data_dir
+	def [](path)
+#		ret = self
+#		for name in path.split '/'
+#			ret = ret/name
+#		ret
+		self+path
+	end
+
 	def del!
 		FileUtils.rmtree self.abs_path
 		flush!
@@ -472,6 +483,14 @@ class IDir < IPath
 			end
 	end
 
+	# << array of strings
+	def clear_glob(reject_by_start:nil)
+		self
+			.glob('**/*', File::FNM_DOTMATCH)
+			.reject {|_| _.name == '.' || _ == pn }
+			.map {|_| _.relative_path_from(self).path }
+	end
+
 	# << INodes
 	# *10 times slower then:
 	#	dirs = @local_dir.glob("*/", File::FNM_DOTMATCH)
@@ -504,9 +523,9 @@ class IDir < IPath
 	# << arrays of names/paths
 	def fast_children(full:false)
 		path_   # cache
-		all_names = Dir.glob('*'.freeze, File::FNM_DOTMATCH, base:@pn.path, sort:false)
+		all_names = Dir.glob('*', File::FNM_DOTMATCH, base:@pn.path, sort:false)
 		all_names.shift 2   # drop ['.', '..']
-		dirs_names = Dir.glob('*/'.freeze, File::FNM_DOTMATCH, base:@pn.path, sort:false)
+		dirs_names = Dir.glob('*/', File::FNM_DOTMATCH, base:@pn.path, sort:false)
 		dirs_names.shift 2   # drop ['.', '..']
 		dirs_names.each {|_| _.chop! }
 		files_names = all_names - dirs_names
@@ -528,6 +547,7 @@ class IDir < IPath
 	# - junction are copied as symlinks
 	def copy_in(path, fix_links:false, attr:true)
 		path = path.to_s
+		create unless parent.exists?
 		if path.chomp! '/'
 			f_copy_content = true
 			# *symlinks are copied (relative dir links become broken)
@@ -579,12 +599,21 @@ class IDir < IPath
 
 	# copy content of a dir, not the dir itself
 	def copy_to(dest)
+		dest.create
 		FileUtils.copy_entry self, dest, preserve=true, dereference_root=false, remove_destination=false
+		self
 	end
 	alias :>> copy_to
 
+	# dir.cd
+	def cd
+		Dir.chdir self
+		self
+	end
+
+	# dir.in do
 	def in(&block)
-		FS.chdir self, &block
+		Dir.chdir self, &block
 	end
 
 	# (>>>)
@@ -643,7 +672,11 @@ class IFile < IPath
 	# -copy file
 	# *dest can be file path or dir
 	def copy_to(dest)
+		if dest.is_a? IDir
+			dest.create
+		end
 		FileUtils.cp self, dest, preserve:true
+		self
 	# *file can be locked temporarily
 	rescue Errno::EACCES
 		# retry few times
@@ -660,6 +693,7 @@ class IFile < IPath
 	end
 	alias :>> copy_to
 
+	# dest dir should exist or such file will be created
 	def move_to(dest)
 		FileUtils.mv self, dest
 	# *file can be locked temporarily
@@ -786,6 +820,7 @@ module FS
 		def chdir(*up, &blk)
 			Dir.chdir *up, &blk
 		end
+		alias :cd chdir
 	end
 end
 

@@ -45,7 +45,7 @@ class Storage
 					# skip if such file should exist
 					files[from].find_by(name:file.name)
 				end
-			# *delete first to free up storage and to define a storage_dir
+			# *delete first to free up storage and to define a storage_dir, set_dir
 			to.del_many del_files
 		
 			# *'z_tmp_sync' added to Shared.skip_root_nodes
@@ -65,9 +65,24 @@ class Storage
 
 
 	attr :key, :db
-	def initialize(key:nil, sync_db:nil, **o)
+	attr_accessor :base_data
+	def initialize(key:nil, set:nil, in_storage_dir:nil, **o)
 		@key = key
-		fail 'NotImplemented'
+		@set = set
+		@in_storage_dir = in_storage_dir
+		@set ||= Sync::C_def_set_name
+	end
+
+	def target_dir
+		@target_dir ||= @in_storage_dir ? storage_dir : set_dir
+	end
+#	def target_dir=(dir)
+#		@target_dir = dir
+	# *used for migration
+	def in_storage_dir
+		@target_dir = storage_dir
+		yield
+		@target_dir = nil
 	end
 
 	def mode
@@ -126,21 +141,34 @@ class Storage
 		end
 	end
 
+	def nodes(only_files:nil)
+		fail 'NotImplemented'
+	end
 	# all stored files
 	def files
-		fail 'NotImplemented'
+		nodes only_files:true
 	end
 
 	def storage_dir
 		fail 'NotImplemented'
 	end
 
-	def del_storage_dir!
+	def set_dir
 		fail 'NotImplemented'
 	end
 
+	# do not create, just check
+	def set_dir_exists?
+		fail 'NotImplemented'
+	end
+
+	def del_storage_dir!
+		@storage_dir = nil
+		@target_dir = nil
+	end
+
 	def do_in_parallel(tasks:nil)
-		storage_dir   # ensure dir created here, not in each thread
+		target_dir   # ensure dir created here, not in each thread
 		tasks = tasks.dup
 		5.times.map do
 			Thread.new do
@@ -152,18 +180,21 @@ class Storage
 	end
 end
 
+	# + normalize file api (see in Storage::GoogleDrive)
 
 
 #! should be is separate file
 class Storage::LocalFS < Storage
-	def initialize(key:nil, dir_path:nil, **o)
+	def initialize(key:nil, dir_path:nil, set:nil, **o)
 		@key = key
 		@dir_path = dir_path
+		@set = set
+		super
 	end
 
 	def add_update(file)
 		super do
-			file.copy_to storage_dir
+			file.copy_to target_dir
 		end
 	end
 	def add_update_many(files)
@@ -177,7 +208,7 @@ class Storage::LocalFS < Storage
 	# *return ori file if to: not provided (optimization to avoid creating temp files)
 	def get(name, to:nil)
 		super do |to_file|
-			file = storage_dir/name
+			file = target_dir/name
 			if to
 				file >> to_file
 				to_file
@@ -188,7 +219,7 @@ class Storage::LocalFS < Storage
 	end
 
 	def del(name)
-		storage_dir.files
+		target_dir.files
 			.find {|_| _.name == name }
 			.then {|_| _.del! }
 	end
@@ -200,17 +231,30 @@ class Storage::LocalFS < Storage
 		end
 	end
 
-	def files
-		storage_dir.files
+	def nodes(only_files:nil)
+		if only_files
+			target_dir.files
+		else
+			target_dir.children
+		end
 	end
 
 	def storage_dir
-		@storage_dir = IDir.new(@dir_path).create
+		@storage_dir ||= IDir.new(@dir_path).create
+	end
+
+	def set_dir
+		@set_dir ||= (storage_dir/@set).create
+	end
+
+	# do not create, just check
+	def set_dir_exists?
+		storage_dir[@set].exists?
 	end
 
 	def del_storage_dir!
 		storage_dir.del!
-		@storage_dir = nil
+		super
 	end
 end
 
@@ -224,16 +268,16 @@ class Storage::GoogleDrive < Storage
 	C_client_id ||= '1062295892893-hvgn9if8pl62g8kkcg1ji1kvjogm4omq.apps.googleusercontent.com'
 	C_client_secret ||= 'njfZb-5r9M7hbxRhHylWyxCo'
 
-	def initialize(key:nil, account:nil, sync_db:nil, dir_name:C_storage_dir_name, **o)
+	def initialize(key:nil, account:nil, set:nil, dir_name:C_storage_dir_name, **o)
 		@key = key
 		@account = account
+		@set = set
 		@dir_name = dir_name
+		super
 		raise KnownError, "(GoogleDrive) 'account' param missed" if !@account
 		# *takes 1.5s
 		require 'google_drive'
 		key = "storage_GoogleDrive__#{@account}"
-		@db = sync_db.storages_data[key] ||= {}
-		sync_db.add_save!(@db, 'storages_data')
 		@db_global = Sync.db.storages_data[key] ||= {}
 		Sync.db.add_save!(@db_global, 'storages_data')
 	end
@@ -296,12 +340,12 @@ class Storage::GoogleDrive < Storage
 
 	def add_update(file)
 		super do
-			if stored_file=storage_dir.file_by_title(file.name)
+			if stored_file=target_dir.file_by_title(file.name)
 				stored_file.update_from_file file.abs_path
 			else
 				# *allows to upload files with the same name
 				# upload_from_io(io, title = 'Untitled', params = {})
-				storage_dir.upload_from_file(file.abs_path, nil, convert:false)
+				target_dir.upload_from_file(file.abs_path, nil, convert:false)
 			end
 		# *too many different errors: HTTPClient::KeepAliveDisconnected, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ENETUNREACH, Google::Apis::TransmissionError, SocketError
 		rescue
@@ -320,7 +364,7 @@ class Storage::GoogleDrive < Storage
 
 	def get(name, to:nil)
 		super do |to_file|
-			file = storage_dir.file_by_title name
+			file = target_dir.file_by_title name
 			raise KnownError, "(GoogleDrive - #{@account}) file not found: #{name}" if !file
 			file.download_to_file to_file.to_s
 			to_file
@@ -328,55 +372,53 @@ class Storage::GoogleDrive < Storage
 	end
 
 	def del(name)
-		file = storage_dir.file_by_title name
+		file = target_dir.file_by_title name
 		file.and.delete 'permanent'
 	end
 
 	def storage_dir
-		@_storage_dir ||= begin
-			if id=@db.dir_id
-				session.folder_by_id id
-			else
-				# *session.collection_by_title — throws error because tries to work with the root dirs (no permission)
-				# this file_by_title actually finds the dir
-				dir = session.file_by_title @dir_name
-				# (<!) raise if such dir already exists (may be used by other sync)
-				# *for .down use a dir found by name
-				if mode == :up
-					raise KnownError, "(GoogleDrive - #{@account}) dir '#{@dir_name}' already exists -- provide other dir_name or delete this dir (even from Trash)" if dir
+		@storage_dir ||= begin
+			# *session.collection_by_title — throws error because tries to work with the root dirs (no permission)
+			# this file_by_title actually finds the dir
+			dir = session.file_by_title @dir_name
+			if !dir
+				if mode == :up   # default
 					dir = create_dir @dir_name
-
-					# *add dir with a warn tittle ("warn-dir")
-					#   there is a problem that if we upload some files to this dir manually (like via web UI) this app cannot see/access them because they
-					#   are not created with the app; also we cannot clear/delete this dir, there will be an error;
-					#     appNotAuthorizedToChild: The user has not granted the app 525741267076 write access to the child file 1RjqzReTiTwV-riDq8Eged05YVzArrY5v, which would be affected by the operation on the parent. (Google::Apis::ClientError)
-					dir.create_subcollection C_warn_dir_name
-				end
-
-				@db.dir_id = dir.id
-				@db.save
-				dir
-			end
-		rescue Google::Apis::ClientError
-			# if the dir missed — recreate
-			if $!.status_code == 404
-				if mode == :up
-																																											w("storage_dir missed -- recreate")
-					@db.delete :dir_id
-					retry
+					if @in_storage_dir
+						# *add dir with a warn tittle ("warn-dir")
+						#   there is a problem that if we upload some files to this dir manually (like via web UI) this app cannot see/access them because they
+						#   are not created with the app; also we cannot clear/delete this dir, there will be an error;
+						#     appNotAuthorizedToChild: The user has not granted the app 525741267076 write access to the child file 1RjqzReTiTwV-riDq8Eged05YVzArrY5v, which would be affected by the operation on the parent. (Google::Apis::ClientError)
+						res = dir.create_subcollection C_warn_dir_name
+					end
 				else
-					raise KnownError, "(GoogleDrive - #{@account}) dir '#{@dir_name}' with id '#{id}' is missed"
+					raise KnownError, "(GoogleDrive - #{@account}) dir '#{@dir_name}' is missed"
 				end
-			else
-				raise
 			end
+
+			dir
 		end
 	end
 
-	def files
+	def set_dir
+		@set_dir ||= begin
+			storage_dir.subcollection_by_title(@set) || storage_dir.create_subcollection(@set)
+		end
+	end
+
+	# do not create, just check
+	def set_dir_exists?
+		storage_dir.subcollection_by_title(@set)
+	end
+
+	def nodes(only_files:nil)
 		arr = []
-		# *without block it returns only first 100 items
-		storage_dir.files do |_|
+		# *without block it returns only first 100 files
+		o = {}
+		if only_files
+			o = {q:"mimeType != 'application/vnd.google-apps.folder'"}
+		end
+		target_dir.files(o) do |_|
 			next if _.name == C_warn_dir_name
 			arr << _.extend(FileExt)
 		end
@@ -390,8 +432,8 @@ class Storage::GoogleDrive < Storage
 	def del_storage_dir!
 		if dir=session.file_by_title(@dir_name)
 			dir.delete 'permanent'
-			@_storage_dir = nil
 		end
+		super
 	end
 
 	# normalize file api
@@ -400,8 +442,12 @@ class Storage::GoogleDrive < Storage
 		def mtime
 			modified_time
 		end
+		def move_to(dest)
+			dest.add self
+		end
 	end
 end
+
 
 
 

@@ -13,6 +13,7 @@
 #   @db = sync_db.storages[key] ?= {}
 #   sync_db.add_save!(@db, 'storages')
 #   @db.save
+# frozen_string_literal: true
 
 class DirDB
 
@@ -31,11 +32,12 @@ class DirDB
 		@f_prod
 	end
 
-	def initialize(dname=nil, dir:Dir.pwd)
-		@dname = dname || C_default_dir
-		@dir = dir
+	def initialize(dname=nil, dir:Dir.pwd, load:true)
+		@dname = dname&.to_s || C_default_dir
+		@dir = IDir.new dir
 		@ext = '.dat'
 		@data_by_name = {}
+		self.load if load
 	end
 
 	# for k, v in @up_db
@@ -51,9 +53,8 @@ class DirDB
 		@data_by_name.filter_map &blk
 	end
 	
-
 	def dir
-		@dname
+		@dir/@dname
 	end
 
 	def add_save!(obj, name)
@@ -86,10 +87,14 @@ class DirDB
 	end
 
 	def load(only_name=nil)
-		Dir.chdir @dir do
+		# ensure dir exists
+		@dir.create
+		@dir.in do
 			# for each .dat file in the @dname (ignore subdirs)
 			Dir.glob((only_name||'*')+@ext, base:@dname) do |fname|
 				if name=File.basename(fname, @ext)
+					# *binread here causes errors like:
+					# `encode': "\\xC2" to UTF-8 in conversion from ASCII-8BIT to UTF-8 to UTF-16LE (Encoding::UndefinedConversionError)
 					self.send name+'=', eval(File.read @dname+'/'+fname)
 				end
 			end
@@ -128,10 +133,8 @@ class DirDB
 			return
 		end
 
-		# Dir.chdir @dir do
 		begin
 			# ensure @dname exists
-			dir = IDir.new(@dir)/@dname
 			dir.create
 
 			to_save = @data_by_name.dup
@@ -141,15 +144,17 @@ class DirDB
 				check_data! data if DirDB.dev?
 				# save tmp file to do not corrupt original in case of an error
 				tmp_file = dir/(name+'_'+@ext)
-				tmp_file.open 'w' do |f|
+				tmp_file.open 'wb' do |f|
 					#			load				save				size
 					# dev	0.366-0.385	2.085-2.116	1673K
 					# prod	0.332-0.351	0.116-0.124	1576K
 					#! ще можна спробувати різні джеми для JSON
 					if DirDB.dev?
+						# *saves with LF on Win
 						require 'pp'
 						PP.pp data, f, 150
 					else
+						# *saves with CRLF on Win
 						f.write data.inspect
 					end
 				end

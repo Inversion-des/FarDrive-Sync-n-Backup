@@ -117,34 +117,43 @@ end
 class Sync
 	include Helpers
 	ZipCls = Ruby7Zip
+	C_def_set_name = '#def_set'
 
 	#- for class
 	class << self
 		include Helpers
 	end
+
+	# *global db files (in the root of .db) are synced to the own list of storages (storages.dat)
 	def Sync.global_filter
 		@global_filter ||= Filter.new(db:db).load
 	end
 	def Sync.db
-		@db ||= DirDB.new(db_dir.name, dir:db_dir.parent).load
+		@db ||= DirDB.new db_dir.name, dir:db_dir.parent
+	end
+	def Sync.set
+		# needed for compatibility with: @sync.set
+		nil
 	end
 	def Sync.flush_db
 		@db = nil
+		# *do not reset @db_dir here because pwd could be changed but we want only to reset the db
 	end
 	def Sync.db_dir
 		# *dir should be in pwd
-		@db_dir ||= IDir.new 'db_global'
+		@db_dir ||= IDir.new '.db'
+	end
+	def Sync.flush_db_dir
+		@db_dir = nil
 	end
 	def Sync.h_storage
-		@h_storage ||= StorageHelper.new(sync:self)
+		@h_storage ||= StorageHelper.new(sync:self, in_storage_dir:true)
 	end
 	def Sync.flush_h_storage
 		@h_storage = nil
 	end
 	def Sync.db_up
-		#. ensure dir_id is saved in storages_data.dat
-		#  this can raise NoDefinedStoragesError
-		Sync.h_storage.for_each {|_| _.storage_dir }
+		Sync.h_storage.prepare   # *this can raise NoDefinedStoragesError
 		# *base.dat needed for h_storage.fast_one
 		@db.base.tap do |_|
 			_.last_up_at = at
@@ -154,6 +163,7 @@ class Sync
 			next if k == 'device'   # device.dat should not be synced
 			db_dir/"#{k}.dat"
 		end
+		# upload to the root dir instead of set_dir
 		Sync.h_storage.for_each {|_| _.add_update_many files }
 	end
 	def Sync.db_down
@@ -167,17 +177,19 @@ class Sync
 	def Sync.device
 		db.device.id || 'device'
 	end
+	# should differ from the app dir or there will be collision with the z_tmp_fast_one dir
 	def Sync.start_dir
-		@start_dir ||= IDir.new '.'
+		@start_dir ||= IDir.new '.db'
 	end
-	def Sync.tmp_dir
-		@tmp_dir ||= IDir.new('z_tmp').create.clear!
-	end
+#	def Sync.tmp_dir
+#		@tmp_dir ?= IDir.new('z_tmp').create.clear!
 
 
-	# *.local_dir used in Tree
-	attr :local_dir, :db, :files, :dirs, :stats, :ignore_by_path, :tree, :start_dir, :tmp_dir
-	def initialize(local:nil, remote:nil, conf:{}, on:nil)
+	attr :db, :set, :files, :dirs, :stats, :ignore_by_path, :tree, :trees, :start_dir, :tmp_dir
+	# set_mod: '(2)' — modifier that can be used to restore local dir to some other local dir (set_dir should be different to work correctly)
+	def initialize(set:C_def_set_name, set_mod:'', local:nil, remote:nil, conf:{}, on:nil)
+		@set = set
+		@set_mod = set_mod
 		@remote = remote
 		@on = on
 		@conf = {
@@ -190,25 +202,63 @@ class Sync
 		@stats = {}
 		set_at!   # *needed for tests
 		@hub = Hub.new
-		@local_dir = IDir.new local
+
+		# normalize local
+		if local.isnt.hash?
+			local = {
+				dir_1: local
+			}
+		end
+		@local_dirs = {}
+		@filter_for = {}
+		local.each do |key, path_dir|
+			@local_dirs[key] = IDir.new path_dir, base:true
+		end
 	end
+	# -init
 	def init
 		# ignore flag^@f_init_done
 		return if @f_init_done
 		@f_init_done = true
-		raise KnownError, "(init) local path not found: #{@local_dir.abs_path}" unless @local_dir.exists?
+		for key, dir in @local_dirs
+			raise KnownError, "(init) local dir not found: #{dir.abs_path}" unless dir.exists?
+		end
+
+		# *both should have .start_dir which is used in the StorageHelper
 		Sync.start_dir   # cache dir
-		Sync.db   # *we should call it before any chdir to define proper source dir
-		Dir.chdir @local_dir   # work in the local_dir
-		@start_dir = IDir.new '.'   # we cannot use @local_dir because of Sync.start_dir
-																																										# time_start
-																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		@db = DirDB.new
-		@db_fn = @db.dir+'.7z'
-		@db.load
+		@start_dir = IDir.new '.'
+		set_dir_name = @set+@set_mod
+
+		# (tmp) migrate to the new data structure (1/2)
+		if @start_dir[:db_global].exists? && !@start_dir['.db'].exists?
+																																										w("migrate db_global")
+			@start_dir[:db_global] >> @start_dir/'.db'
+			@start_dir[:db_global].del!
+		end
+		for key, dir in @local_dirs
+			# *in tests we use app dir as a local dir so it contains .db
+			set_dir = @start_dir/'.db/sets'/set_dir_name
+			if dir != @start_dir && dir['.db'].exists? && (@start_dir['.db/sets'].not.exists? || set_dir.not.exists?)
+																																										w("migrate .db for #{key}")
+				dir['.db'] >> set_dir
+				dir['.db'].del!
+				set_dir['tree_data.dat'].move_to set_dir[:dir_1].create
+				set_dir['storages_data.dat'].del!
+
+				@f_local_set_data_migrated = true
+			end
+		end
+		 																																								# time_start
+		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+		Sync.db   # init
+		@db = DirDB.new set_dir_name, dir:'.db/sets'
+		@db_fn = '#set_db.7z'   # how set db will be saved on the storage
 																																										# time_end2^@db.load
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(@db.load) processed in #{'%.3f' % ttime}")
+		# detect the first run for set
+		@f_set_first_run = @db.base.empty?
+
 		# use 'remote:' if provided
 		# *this will not created db record
 		if @remote
@@ -219,17 +269,49 @@ class Sync
 			)
 		end
 
-		@tree_data = @db.tree_data
 		Chunk.set_db @db.data_by_file_key
 		@tmp_dir = IDir.new 'z_tmp'
-		Shared.skip_root_nodes = [@db.dir, @tmp_dir.name, 'w.txt', 'z_tmp_sync', 'z_tmp_fast_one']
+
+		# skip special root dirs (needed because we can be in the app dir, like in tests)
+		Shared.skip_root_nodes = ['.db', @tmp_dir.name, 'z_tmp_sync', 'z_tmp_fast_one']
+		# Shared.skip_root_nodes = []
+		@ignore_by_path = {}
+		@ignore_by_path['.db'] = 1
+		@ignore_by_path[@tmp_dir.name] = 1
+
 		controller
 	end
 
+	def migrate_storages
+		# (tmp) migrate to the new data structure (2/2)
+		if !@f_set_first_run && @f_local_set_data_migrated
+			h_storage.for_each do |storage|
+				storage.in_storage_dir do
+					if !storage.set_dir_exists? && storage.files.n > 0
+																																										w("migrate files to set_dir for #{storage.key}")
+						storage.del '.db.7z'
+						storage.del 'base.dat'
+						storage.files.each do |_|
+							print '.'
+							_.move_to storage.set_dir
+						end
+					end
+				end
+			end
+		end
+	end
+	# *should be saved explicitly: sync.filter.save
 	def filter
 		@filter ||= begin
 			init
 			Filter.new(db:@db).load
+		end
+	end
+
+	def filter_for(dir_key)
+		@filter_for[dir_key] ||= begin
+			db = DirDB.new dir_key, dir:@db.dir   # dir db
+			Filter.new(db:db).load
 		end
 	end
 
@@ -270,6 +352,7 @@ class Sync
 
 	# -up
 	def up
+																																										w("\n")
 																																										w("up")
 		Shared.mode = :up   # fail if storage_dir already exists
 		init
@@ -279,28 +362,73 @@ class Sync
 		# *block can be used for some configurations
 		yield if block_given?
 
+		migrate_storages
+
 		# auth first if tokens missed (one by one for clear workflow)
 		h_storage.prepare
+		if @f_set_first_run
+			h_storage.for_each do |_|
+				if _.set_dir_exists?
+					raise KnownError, "The bkp-set dir '#{@set}' already exists on the storage. Use 'set:' param to give this set a unique name."
+				end
+			end
+		end
 
+		# Sync.db_up
 		Thread.new do
 			Sync.db_up
 		rescue NoDefinedStoragesError
 			:skip
 																																										w("(Sync.db_up) no defined storages -- db_global not synced")
 		end
+
 		# *thread needed to be able to stop the process, resolve some issues and then continue
 		@my_thread = Thread.new do
-			get_nodes!
-			build_tree
 
-			@files = @tree.state.added.files + @tree.state.changed.files
-																																										w(%Q{@files.n=}+@files.n.inspect)
+			@files = []
+			@tree = {}
+			@tree.stats = Hash.new 0
+			@tree.state = Hash.new {|h, k| h[k]=[] }   # used for checks in tests
+			@trees = {}
+			skipped = []
+			@local_dirs.each do |key, dir|
+				dirs = get_branch_dirs dir
+				@dirs += dirs
+				db = DirDB.new key, dir:@db.dir   # dir db
+				tree = build_tree key, dir, dirs, db
+				@trees[key] = tree
+
+				# update total stats
+				for k, v in tree.stats.except(:files_added_size, :files_changed_size)
+					@tree.stats[k] += v
+				end
+				@tree.stats.files_added_size += tree.state.added.files.sum(&:size)
+				@tree.stats.files_changed_size += tree.state.changed.files.sum(&:size)
+
+				for k in [:added, :excluded]
+					@tree.state[k] += tree.state[k]
+				end
+				@files += tree.state.added.files + tree.state.changed.files
+				skipped += tree.state.skipped
+			end
+			 																																							w(%Q{@files.n=}+@files.n.inspect)
+			# calc total size (2/2)
+			@tree.stats.files_added_size = @tree.stats.files_added_size.hr
+			@tree.stats.files_changed_size = @tree.stats.files_changed_size.hr
+			# *we cannot get size of deleted file and we do not store it in file.d
+			# @tree.stats.files_removed_size = @state.removed.files.sum(&:size).hr
+																																											# w^@tree.stats:
+																																											w("@tree.stats:")
+																																											# pp^@tree.stats
+																																											pp(@tree.stats)
+
 			make_packs!
 
 
 			#-- list skipped files
-			skipped_due_to_path_limit = @tree.state.skipped.select {|_| _.d.error.is_a? WinPathLimitError }
-			other_skipped = @tree.state.skipped - skipped_due_to_path_limit
+			@tree.state.skipped = skipped   # used in tests for checks
+			skipped_due_to_path_limit = skipped.select {|_| _.d.error.is_a? WinPathLimitError }
+			other_skipped = skipped - skipped_due_to_path_limit
 
 			# general skipped
 			skipped = other_skipped
@@ -322,7 +450,9 @@ class Sync
 			@status.f_done = true
 		end
 																																										#* for profiler to have only 1 thread
+
 		wait_for_results
+		@f_set_first_run = false
 	end
 
 	def wait_for_results
@@ -332,11 +462,11 @@ class Sync
 			if @status.f_done
 				break
 			end
-			if @tree.and.state.and.hardlink_map_missed[0]
-				@hub.fire :hardlink_map_missed, @tree.state.hardlink_map_missed
+			if @hardlinks_map_missed[0]
+				@hub.fire :hardlink_map_missed, @hardlinks_map_missed
 			end
-			if @tree.and.state.and.link_broken[0]
-				@hub.fire :broken_links, @tree.state.link_broken
+			if @links_broken[0]
+				@hub.fire :broken_links, @links_broken
 			end
 			# abort on exception iside the thread
 			if !@my_thread.alive?
@@ -348,18 +478,39 @@ class Sync
 
 	# -down
 	def down
+		# can be used to update even with a corrupted local set db
+		# @f_force_update = true
+																																							#~ down\
+																																										w("\n")
 																																										w("down")
 		Shared.mode = :down  # use a storage_dir found by name, do not raise
-		@local_dir.create   # ensure dir exists
+		@local_dirs.values.each &:create   # ensure dirs exist
 		init
 		@tmp_dir.create.clear!
 
 		# *block can be used for some configurations
 		yield if block_given?
 
+		migrate_storages
+
 		# auth first if tokens missed, otherwise .fast_one will fail with a timeout error
 		h_storage.prepare
-
+		 																																								# time_start
+		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+		up_db_file = h_storage.fast_one.get @db_fn, to:@tmp_dir
+																																										# time_end2^get up_db_file
+																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+																																										w("(get up_db_file) processed in #{'%.3f' % ttime}")
+		# (<!) skip if up db is old or same
+		# *we do not compare .last_pack_id because only folders could be created/deleted and new pack is not created in such case
+		#   also for global db there is no last_pack_id
+		if h_storage.fast_one.base_data.last_up_at <= (@db.base.last_up_at||0)
+																																										w("up db is the same - skip")
+			return
+		end
+		 																																								# time_start
+		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+																																							#~ down
 		# update db_global for this device
 		# *there is no critical data for down, so we can do it in parallel
 		#   only storage tokens can be useful but even this upldate needs fresh tokens
@@ -374,427 +525,425 @@ class Sync
 			:skip
 																																										w("(Sync.db_down) no defined storages -- db_global not synced")
 		end
-		 																																								# time_start
-		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		up_db_file = h_storage.fast_one.get @db_fn, to:@tmp_dir
-																																										# time_end2^get up_db_file
-																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(get up_db_file) processed in #{'%.3f' % ttime}")
-		# (<!) skip if up db is the same
-		if up_db_file.mtime.to_i == @db.base.last_up_at
-																																										w("up db is the same - skip")
-			return
-		end
-		 																																								# time_start
-		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 		# db unpack and load
+		@local_dirs_up_db_by_key = {}
+		up_db_dir = @tmp_dir/:up_db
 		StringIO.open(up_db_file.binread) do |zip|
-			ZipCls.new(zip:zip).unpack_all to:@tmp_dir
-			@up_db = DirDB.new @tmp_dir.abs_path
-			@up_db.load
-			# remove up db files
-			@tmp_dir.clear!
+			ZipCls.new(zip:zip).unpack_all to:up_db_dir
+			@up_db = DirDB.new up_db_dir.abs_path
+			# *load only needed subdirs, not all unpacked
+			for key in @local_dirs.keys
+				@local_dirs_up_db_by_key[key] = DirDB.new key, dir:up_db_dir
+			end
 		end
 		 																																								# time_end2^db unpack and load
 		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 		 																																								w("(db unpack and load) processed in #{'%.3f' % ttime}")
-																																										#-#!_ o^@up_db.tree_data
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 		#-- process dirs list
-		nodes_processed_by_path = {}
-		files_to_download_queue = []
-		dir_symlinks_failed = []
-		file_links_failed = []
-		dirs_to_delete = []
-		files_to_delete = []
 		skipped_due_to_max_path = INodes.new
-
-		tasks = []
-		for dir_path, dir_up_d in @up_db.tree_data
-			#. skip old deleted dirs or if dir doesn't exists
-			next if dir_up_d[:deleted] && (!@tree_data[dir_path] || @tree_data[dir_path][:deleted])
-			dir = IDir.new dir_path, base:@local_dir
-			tasks << [dir, dir_path, dir_up_d]
-		end
-
-		do_in_parallel(tasks:tasks) do |dir, dir_path, dir_up_d|
-			next if dir_up_d.excluded
-			while !dir.parent.exists?
-				# retry few times (it can be created in a parallel thread)
-				attempt ||= 0
-				attempt += 1
-				if attempt > 5
-					# was: raise
-					puts "(parent.exists?) failed for: #{dir.parent.path}"
-					break
-				end
-				print '^'
-				sleep 0.001
-			end
-			next if !dir.parent.exists?
-
-			# process this dir
-			nodes_processed_by_path[dir_path] = 1
-			if dir_up_d.deleted
-				# (<)
-				#. *we should delete dirs and files after all other operations (in some cases file can be used)  (1/3)
-				dirs_to_delete << dir
-				next
-			# dir should exist
-			else
-				# if exists
-				if @tree_data[dir_path] && dir.exists?
-					if dir_path != '.'
-						# type changed dir/dir_link
-						if dir_up_d.link
-							# dir > dir_link || link changed
-							if !dir.symlink? || dir.link.path != dir_up_d.link
-								dir.del!
-								# try to create dir symlink
-								res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
-								if res.failed
-									dir_symlinks_failed << res
-								end
-							end
-						elsif dir.symlink? && !dir_up_d.link
-							dir.del!
-							dir.create(mtime:dir_up_d.mtime)
-						end
-					end
-				# if dir missed
-				else
-					# create
-					if dir_up_d.link
-						# try to create dir symlink
-						res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
-						if res.failed
-							dir_symlinks_failed << res
-						end
-					else
-						begin
-							dir.create(mtime:dir_up_d.mtime)
-						rescue Errno::ENOENT
-							# precess ENOENT (detect MAX_PATH)^dir
-							if dir.abs_path.length > WinPathLimit
-								w "(on_ready) dir skipped due to Windows MAX_PATH limit:\n  #{dir.abs_path}"
-								skipped_due_to_max_path << dir
-							else
-								pputs "(on_ready) ENOENT: #{dir.path}"
-								puts $!
-								puts $@.first 7
-							end
-							# (<) do not process dir attrs and files
-							next   # dir
-						end
-					end
-				end
-			end
+		@local_dirs.each do |local_dir_key, local_dir|
+			db = DirDB.new local_dir_key, dir:@db.dir
+			tree_data = db.tree_data
+			up_db = @local_dirs_up_db_by_key[local_dir_key]
+			nodes_processed_by_path = {}
+			files_to_download_queue = []
+			dir_symlinks_failed = []
+			file_links_failed = []
+			dirs_to_delete = []
+			files_to_delete = []
 																																							#~ down
-			# (<) if link — do not process files
-			next if dir_up_d.link
-			# update attrs
-			dir.attrs = dir_up_d.attrs || []
-			# process dir files
-			path_ = dir.path_
-			for fname, file_up_d in dir_up_d.files
-				next if file_up_d.excluded
-				f_down = nil
-				fpath = path_+fname
-				file = IFile.new fpath
-				if file_up_d.deleted
-					#. *we should delete dirs and files after all other operations (in some cases file can be used)  (2/3)
-					files_to_delete << file
-					nodes_processed_by_path[fpath] = 1
-				# if file should exist
-				else
-					# if file data or file exists
-					if (file_d=@tree_data[dir_path]&.files[fname]) || file.lexists?
-						nodes_processed_by_path[fpath] = 1
+			tasks = []
+			for dir_path, dir_up_d in up_db.tree_data
+				#. skip old deleted dirs or if dir doesn't exist
+				next if dir_up_d[:deleted] && !@f_force_update && (!tree_data[dir_path] || tree_data[dir_path][:deleted])
+				dir = IDir.new dir_path, base:local_dir.abs_path
+				tasks << [dir, dir_path, dir_up_d]
+			end
 
-						# type changed file/file_link
-						if file_up_d.link
-							# file > file_link || link changed
-							if !file.symlink? || file.link.path != file_up_d.link
+			do_in_parallel(tasks:tasks) do |dir, dir_path, dir_up_d|
+				next if dir_up_d.excluded
+				while !dir.parent.exists?
+					# retry few times (it can be created in a parallel thread)
+					attempt ||= 0
+					attempt += 1
+					if attempt > 5
+						# was: raise
+						w "(parent.exists?) failed for: #{dir.parent.path}"
+						break
+					end
+					print '^'
+					sleep 0.001
+				end
+				next if !dir.parent.exists?
+																																							#~ down
+				# process this dir
+				nodes_processed_by_path[dir_path] = 1
+				if dir_up_d.deleted
+					# (<)
+					#. *we should delete dirs and files after all other operations (in some cases file can be used)  (1/3)
+					dirs_to_delete << dir
+					next
+				# dir should exist
+				else
+					# if exists
+					if tree_data[dir_path] && dir.exists?
+						if dir_path != '.'
+							# type changed dir/dir_link
+							if dir_up_d.link
+								# dir > dir_link || link changed
+								if !dir.symlink? || dir.link.path != dir_up_d.link
+									dir.del!
+									# try to create dir symlink
+									res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
+									if res.failed
+										dir_symlinks_failed << res
+									end
+								end
+							elsif dir.symlink? && !dir_up_d.link
+								dir.del!
+								dir.create(mtime:dir_up_d.mtime)
+							end
+						end
+					# if dir missed
+					else
+						# create
+						if dir_up_d.link
+							# try to create dir symlink
+							res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
+							if res.failed
+								dir_symlinks_failed << res
+							end
+						else
+							begin
+								dir.create(mtime:dir_up_d.mtime)
+							rescue Errno::ENOENT
+								# precess ENOENT (detect MAX_PATH)^dir
+								if dir.abs_path.length > WinPathLimit
+									w "(on_ready) dir skipped due to Windows MAX_PATH limit:\n  #{dir.abs_path}"
+									skipped_due_to_max_path << dir
+								else
+									pputs "(on_ready) ENOENT: #{dir.path}"
+									puts $!
+									puts $@.first 7
+								end
+								# (<) do not process dir attrs and files
+								next   # dir
+							end
+						end
+					end
+				end
+																																							#~ down
+				# (<) if link — do not process files
+				next if dir_up_d.link
+				# update attrs
+				dir.attrs = dir_up_d.attrs || []
+				# process dir files
+				path_ = dir.path_
+				for fname, file_up_d in dir_up_d.files
+					next if file_up_d.excluded
+					f_down = nil
+					fpath = path_+fname
+					file = IFile.new fpath, base:local_dir.abs_path
+					if file_up_d.deleted
+						#. *we should delete dirs and files after all other operations (in some cases file can be used)  (2/3)
+						files_to_delete << file
+						nodes_processed_by_path[fpath] = 1
+					# if file should exist
+					else
+						# if file data or file exists
+						if (file_d=tree_data[dir_path]&.files[fname]) || file.lexists?
+							nodes_processed_by_path[fpath] = 1
+
+							# type changed file/file_link
+							if file_up_d.link
+								# file > file_link || link changed
+								if !file.symlink? || file.link.path != file_up_d.link
+									file.del!
+									# try to create file symlink
+									res = file.symlink_to file_up_d.link, lmtime:file_up_d.mtime, can_fail:true
+									if res.failed
+										file_links_failed << res
+									end
+								else
+									next
+								end
+							elsif file_up_d.hard_link
+								# file > file_link || link changed
+								if !file.hardlink? || file_d.and.hard_link != file_up_d.hard_link
+									file.del!
+									# try to create file hardlink
+									res = file.hardlink_to file_up_d.hard_link, can_fail:true
+									if res.failed
+										file_links_failed << res
+									end
+								else
+									next
+								end
+							# file_link > file
+							# removed:  ||  file.hardlink? && !file_up_d.hard_link
+							#		 because main files always become hardlinks or user can make a hardlink from any file and it is ok
+							elsif file.symlink? && !file_up_d.link || file_d.and.hard_link && !file_up_d.hard_link
 								file.del!
+								f_down = true
+							# if same version — skip (fix mtime if needed)
+							# *(!)if local file was changed but in local db key is old — file will not be updated
+							#   to change this just use file.key here (should be big slowdown, better to check mtime and if it is not changed — use versions.last)
+							elsif file.lexists? && (!@f_force_update && file_d.and.versions.and.last || file.key) == file_up_d.versions.last
+								update_file file, file_up_d
+								next
+							else   # file changed or missed
+								f_down = true
+							end
+						# if file missed in db
+						else
+							# if link — create
+							if file_up_d.link
 								# try to create file symlink
 								res = file.symlink_to file_up_d.link, lmtime:file_up_d.mtime, can_fail:true
 								if res.failed
 									file_links_failed << res
 								end
-							else
-								next
-							end
-						elsif file_up_d.hard_link
-							# file > file_link || link changed
-							if !file.hardlink? || file_d.and.hard_link != file_up_d.hard_link
-								file.del!
+							elsif file_up_d.hard_link
 								# try to create file hardlink
 								res = file.hardlink_to file_up_d.hard_link, can_fail:true
 								if res.failed
 									file_links_failed << res
 								end
 							else
-								next
+								f_down = true
 							end
-						# file_link > file
-						# removed:  ||  file.hardlink? && !file_up_d.hard_link
-						#		 because main files always become hardlinks or user can make a hardlink from any file and it is ok
-						elsif file.symlink? && !file_up_d.link || file_d.and.hard_link && !file_up_d.hard_link
-							file.del!
-							f_down = true
-						# if same version — skip (fix mtime if needed)
-						# *(!)if local file was changed but in local db key is old — file will not be updated
-						#   to change this just use file.key here (should be big slowdown, better to check mtime and if it is not changed — use versions.last)
-						elsif file.lexists? && (file_d.and.versions.and.last || file.key) == file_up_d.versions.last
-							update_file file, file_up_d
-							next
-						else   # file changed or missed
-							f_down = true
 						end
-					# if file missed in db
-					else
-						# if link — create
-						if file_up_d.link
-							# try to create file symlink
-							res = file.symlink_to file_up_d.link, lmtime:file_up_d.mtime, can_fail:true
-							if res.failed
-								file_links_failed << res
-							end
-						elsif file_up_d.hard_link
-							# try to create file hardlink
-							res = file.hardlink_to file_up_d.hard_link, can_fail:true
-							if res.failed
-								file_links_failed << res
-							end
-						else
-							f_down = true
-						end
-					end
 
-					if f_down
-						# (<) if chunk is available (like when file renamed or there is a copy) — reuse
-						key = file_up_d.versions.last
-						# *files arr can be empty if all the file instances deleted
-						if chunk=Chunk[key]
-							same_file = catch :found do
-								for path in chunk.files
-									same_file = IFile.new path
-									if same_file.exists?
-										throw :found, same_file
+						if f_down
+							# (<) if chunk is available (like when file renamed or there is a copy) — reuse
+							key = file_up_d.versions.last
+							# *files arr can be empty if all the file instances deleted
+							if !@f_force_update && chunk=Chunk[key]
+								same_file = catch :found do
+									for path in chunk.files
+										same_file = IFile.new path, base:local_dir.abs_path
+										if same_file.exists?
+											throw :found, same_file
+										end
 									end
+									nil
 								end
-								nil
+
+								if same_file
+									same_file.copy_to file.abs_path
+									update_file file, file_up_d
+									# *do not download
+									next   # file
+								end
 							end
 
-							if same_file
-								same_file.copy_to file.abs_path
-								update_file file, file_up_d
-								# *do not download
-								next   # file
-							end
+							files_to_download_queue << {
+								file:file,
+								fpath:fpath,
+								mtime:file_up_d.mtime,
+								attrs:file_up_d.attrs,
+								file_key: file_up_d.versions.last
+							}
 						end
-
-						files_to_download_queue << {
-							fpath:fpath,
-							mtime:file_up_d.mtime,
-							attrs:file_up_d.attrs,
-							file_key: file_up_d.versions.last
-						}
 					end
 				end
 			end
-		end
 
-		# *we should delete dirs and files after all other operations (in some cases file can be used)  (3/3)
-		files_to_delete.each &:del!
-		dirs_to_delete.each &:del!
+			# *we should delete dirs and files after all other operations (in some cases file can be used)  (3/3)
+			files_to_delete.each &:del!
+			dirs_to_delete.each &:del!
 																																							#~ down
-		# retry failed dir symlink creations
-		for res in dir_symlinks_failed
-			res.retry.()
-		end
-		# process local tree — delete not marked nodes
-		# *proc needed to localize vars: dir, file
-		proc do
-			for dir_path, dir_d in @tree_data
-				dir = IDir.new dir_path
-				if !nodes_processed_by_path[dir_path]
-					dir.del!
-					next
-				end
-				next if dir_d.link   # do not process files in symlinks
-				for fname, file_d in dir_d.files
-					file = dir/fname
-					if !nodes_processed_by_path[file.path]
-						file.del!
+			# retry failed dir symlink creations
+			for res in dir_symlinks_failed
+				res.retry.()
+			end
+			# process local tree — delete not marked nodes
+			# *proc needed to localize vars: dir, file
+			proc do
+				for dir_path, dir_d in tree_data
+					dir = IDir.new dir_path
+					if !nodes_processed_by_path[dir_path]
+						dir.del!
+						next
+					end
+					next if dir_d.link   # do not process files in symlinks
+					for fname, file_d in dir_d.files
+						file = dir/fname
+						if !nodes_processed_by_path[file.path]
+							file.del!
+						end
 					end
 				end
-			end
-		end.()
-		 																																								w(%Q{files_to_download_queue.n=}+files_to_download_queue.n.inspect)
+			end.()
+																																										w(%Q{files_to_download_queue.n=}+files_to_download_queue.n.inspect)
 																																							#~ down
-		@stats.files_downloaded = files_to_download_queue.n
+			@stats.files_downloaded = files_to_download_queue.n
 																																										# time_end2^state scan
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(state scan) processed in #{'%.3f' % ttime}")
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		loading_packs = []
-		# files download_queue
-		# {fpath, file_key}
-		files_to_download_queue.each do |file_d|
-			d=@up_db.data_by_file_key[file_d.file_key]
-			on_ready = -> (file_body) do
-				file = IFile.new file_d.fpath
-				file.binwrite file_body
-				# fix mtime for some files (chunk is the same but mtime differ)
-				update_file file, file_d
-				file.dir.mtime = @up_db.tree_data[file.dir_path].mtime
-			rescue Errno::ENOENT
-				# precess ENOENT (detect MAX_PATH)^file
-				if file.abs_path.length > WinPathLimit
-					w "(on_ready) file skipped due to Windows MAX_PATH limit:\n  #{file.abs_path}"
-					skipped_due_to_max_path << file
-				else
-					pputs "(on_ready) ENOENT: #{file.path}"
-					puts $!
-					puts $@.first 7
+			loading_packs = []
+			# files download_queue
+			# {fpath, file_key}
+			files_to_download_queue.each do |file_d|
+				d=@up_db.data_by_file_key[file_d.file_key]
+				on_ready = -> (file_body) do
+					file = file_d.file
+					file.binwrite file_body
+					# fix mtime for some files (chunk is the same but mtime differ)
+					update_file file, file_d
+					file.dir.mtime = up_db.tree_data[file.dir_path].mtime
+				rescue Errno::ENOENT
+					# precess ENOENT (detect MAX_PATH)^file
+					if file.abs_path.length > WinPathLimit
+						w "(on_ready) file skipped due to Windows MAX_PATH limit:\n  #{file.abs_path}"
+						skipped_due_to_max_path << file
+					else
+						pputs "(on_ready) ENOENT: #{file.path}"
+						puts $!
+						puts $@.first 7
+					end
+				rescue Errno::EACCES, Errno::EINVAL
+					# retry few times
+					attempt ||= 0
+					# if attempt == 0
+					# 	p :src:, :file_d.fpath:
+					attempt += 1
+					if attempt <= 5
+						file.del!
+						sleep 0.5
+						print ','
+						retry
+					else
+						pputs "(on_ready) failed: #{$!}"
+						puts $@[0]
+					end
 				end
-			rescue Errno::EACCES, Errno::EINVAL
-				# retry few times
-				attempt ||= 0
-				# if attempt == 0
-				# 	p :src:, :file_d.fpath:
-				attempt += 1
-				if attempt <= 5
-					file.del!
-					sleep 0.5
-					print ','
-					retry
-				else
-					pputs "(on_ready) failed: #{$!}"
-					puts $@[0]
-				end
-			end
 
-			#! in async it may return promise, so we can do .then (correct one) here
-			loading_packs << {pack_name:d.pack_name, file_key:file_d.file_key, on_ready:on_ready}
-		end
+				#! in async it may return promise, so we can do .then (correct one) here
+				loading_packs << {pack_name:d.pack_name, file_key:file_d.file_key, on_ready:on_ready}
+			end
 																																							#~ down
-		# {pack_name, file_key, on_ready} --> {pack_name => [{pack_name, file_key, on_ready}, …]}
-		loading_packs_by_name = loading_packs.group_by &:pack_name
-		@stats.packs_downloaded = loading_packs_by_name.length
-		tasks = []
-		pack_index = 0
-		loading_packs_by_name.each do |pack_name, arr; _time_start|
-			tasks << -> do
+			# {pack_name, file_key, on_ready} --> {pack_name => [{pack_name, file_key, on_ready}, …]}
+			loading_packs_by_name = loading_packs.group_by &:pack_name
+			@stats.packs_downloaded = loading_packs_by_name.length
+			tasks = []
+			pack_index = 0
+			loading_packs_by_name.each do |pack_name, arr; _time_start|
+				tasks << -> do
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-				pack_index += 1
-				fname = pack_name+'.7z'
-				task_title = "#{pack_index})"
+					pack_index += 1
+					fname = pack_name+'.7z'
+					task_title = "#{pack_index})"
 																																										w("get: #{task_title} #{fname} ...")
-				# download
-				up_pack_file = h_storage.fast_one.get fname, to:@tmp_dir
+					# download
+					up_pack_file = h_storage.fast_one.get fname, to:@tmp_dir
 																																										w("... got #{task_title} #{up_pack_file.size.hr}")
-				d_arr_by_file_key = arr.group_by &:file_key
-				fnames = d_arr_by_file_key.keys
-				StringIO.open(up_pack_file.binread) do |zip|
-					ZipCls.new(zip:zip).unpack_files(fnames) do |fname, file_body|
-						d_arr = d_arr_by_file_key[fname]
-						for d in d_arr
-							d.on_ready.call file_body
+					d_arr_by_file_key = arr.group_by &:file_key
+					fnames = d_arr_by_file_key.keys
+					StringIO.open(up_pack_file.binread) do |zip|
+						ZipCls.new(zip:zip).unpack_files(fnames) do |fname, file_body|
+							d_arr = d_arr_by_file_key[fname]
+							for d in d_arr
+								d.on_ready.call file_body
+							end
+						end
+					end
+					 																																					w("... done #{task_title} #{fnames.n} files")
+					up_pack_file.del!
+					 																																					# time_end^    in #{'%.3f' % ttime}
+					 																																					ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+					 																																					w("    in #{'%.3f' % ttime}")
+				end
+			end
+			do_in_parallel(tasks:tasks)
+
+			# - all files ready -
+
+			# retry failed file symlink creations
+			for res in file_links_failed
+				res.retry.()
+			end
+			 																																							# time_end2^download + unpack files
+			 																																							ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+			 																																							w("(download + unpack files) processed in #{'%.3f' % ttime}")
+																																										# time_start
+																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+			#-- fix dirs mtime after changes
+			tasks = []
+			for dir_path, dir_up_d in up_db.tree_data
+				next if dir_path == '.'
+				dir = local_dir/dir_path
+				tasks << [dir, dir_up_d]
+			end
+
+			do_in_parallel(tasks:tasks) do |dir, dir_up_d|
+				if dir.exists?
+					if dir.symlink?
+						if dir.lmtime.to_i != dir_up_d.mtime.to_i
+							dir.lmtime = dir_up_d.mtime
+						end
+					else
+						if dir.mtime.to_i != dir_up_d.mtime.to_i
+							dir.mtime = dir_up_d.mtime
 						end
 					end
 				end
-				 																																						w("... done #{task_title} #{fnames.n} files")
-				up_pack_file.del!
-				 																																						# time_end^    in #{'%.3f' % ttime}
-				 																																						ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-				 																																						w("    in #{'%.3f' % ttime}")
 			end
-		end
-		do_in_parallel(tasks:tasks)
-
-		# - all files ready -
-
-		# retry failed file symlink creations
-		for res in file_links_failed
-			res.retry.()
-		end
-		 																																								# time_end2^download + unpack files
-		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-		 																																								w("(download + unpack files) processed in #{'%.3f' % ttime}")
-																																										# time_start
-																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		#-- fix dirs mtime after changes
-		tasks = []
-		for dir_path, dir_up_d in @up_db.tree_data
-			next if dir_path == '.'
-			dir = @local_dir/dir_path
-			tasks << [dir, dir_up_d]
+			 																																							# time_end2^fix dirs mtime
+			 																																							ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+			 																																							w("(fix dirs mtime) processed in #{'%.3f' % ttime}")
 		end
 
-		do_in_parallel(tasks:tasks) do |dir, dir_up_d|
-			if dir.exists?
-				if dir.symlink?
-					if dir.lmtime.to_i != dir_up_d.mtime.to_i
-						dir.lmtime = dir_up_d.mtime
-					end
-				else
-					if dir.mtime.to_i != dir_up_d.mtime.to_i
-						dir.mtime = dir_up_d.mtime
-					end
-				end
-			end
-		end
-		 																																								# time_end2^fix dirs mtime
-		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-		 																																								w("(fix dirs mtime) processed in #{'%.3f' % ttime}")
+		# -- when all dirs restored --
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		# swap db data
-		for k, v in @up_db
-			@db.send "#{k}=", v
-		end
-		@db.save
-		 																																								# time_end2^update db
-		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-		 																																								w("(update db) processed in #{'%.3f' % ttime}")
+		# swap db files
+		up_db_dir >> @db.dir
+																																										# time_end2^update db
+																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+																																										w("(update db) processed in #{'%.3f' % ttime}")
 		# list skipped items due to Windows MAX_PATH limit
 		skipped_due_to_max_path.tap do |skipped|
 			@stats.skipped_due_to_max_path = skipped.n
 			list_MAX_PATH_skipped_files_and_show_a_solution_hint skipped
 		end
 
-		@tmp_dir.del!
+	ensure
+		@tmp_dir.and.del!
 	end
 																																							#~ down/
 
-	def build_tree
-																																										w("-- build_tree --")
+	# *db — dir db
+	def build_tree(key, dir, dirs, db)
+																																										w("-- build_tree (#{key}) --")
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		@tree = Tree.new(sync:self, db:@tree_data, dirs:@dirs)
+		tree = Tree.new(sync:self, key:key, db:db, root_dir:dir, dirs:dirs)
 																																										# time_end2^Tree.new
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(Tree.new) processed in #{'%.3f' % ttime}")
-																																											# w^@tree.stats:
-																																											w("@tree.stats:")
-																																											# pp^@tree.stats
-																																											pp(@tree.stats)
-		 																																								#-#!_ o^@tree_data
+																																											# w^tree.stats.reject{ ~hv==0 }:
+																																											w("tree.stats.reject{|k, v| v==0 }:")
+																																											# pp^tree.stats.reject{ ~hv==0 }
+																																											pp(tree.stats.reject{|k, v| v==0 })
+		 																																								#-#!_ o^db.tree_data
 		# resolve issues
 		loop do
-			if @tree.state.link_broken[0] || @tree.state.hardlink_map_missed[0]
+			if tree.state.link_broken[0] || tree.state.hardlink_map_missed[0]
+				@links_broken = tree.state.link_broken
+				@hardlinks_map_missed = tree.state.hardlink_map_missed
 				((( Thread.stop )))  # wait for resolution
 			else
 				break
 			end
 		end
+		tree
 	end
-
 
 	def make_packs!
 																																										w("-- make_packs! --")
@@ -919,13 +1068,13 @@ class Sync
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(make_packs!) processed in #{'%.3f' % ttime}")
 		end
-		# update db
+		# update db when all the packs done
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		@tree.save
-																																										# time_end2^@tree.save
+		@trees.values.each &:save
+																																										# time_end2^@trees.each &:save
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(@tree.save) processed in #{'%.3f' % ttime}")
+																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
 		Chunks.save
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -937,7 +1086,7 @@ class Sync
 		end
 		# add base.dat separately (needed for detecting full fast_one storage for down)
 		base_uploading_thread = Thread.new do
-			base_file = IFile.new @db.dir+'/base.dat'
+			base_file = IFile.new @db.dir/'base.dat'
 			h_storage.for_each {|_| _.add_update base_file }
 		end
 		# archive db
@@ -955,25 +1104,20 @@ class Sync
 	end
 																																							#~ make_packs!/
 
-	def get_nodes!
+	def get_branch_dirs(dir)
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		#-- process full tree
 		# *process only folders recursively
 
-		# skip special root dirs
-		@ignore_by_path = {}
-		@ignore_by_path[@db.dir] = 1
-		@ignore_by_path[@tmp_dir.path] = 1
+		# include the root dir
+		dirs = [['.', nil]]
 
-		# include . root
-		@dirs = [[@local_dir.path, nil]]
-
-		tasks = []
+		tasks = ['.']
+		base = dir.abs_path + '/'
 		get_dirs = -> (path) do
 			path_ = path == '.' ? '' : path+'/'
 			# *with sorting, in some dirs ['.', '..'] are not the first 2 items and the recursion never ends
-			dirs_names = Dir.glob('*/'.freeze, File::FNM_DOTMATCH, base:path, sort:false)
+			dirs_names = Dir.glob('*/'.freeze, File::FNM_DOTMATCH, base: base+path, sort:false)
 			# drop ['.', '..']
 			dirs_names.shift 2
 			if dirs_names[0]
@@ -982,24 +1126,24 @@ class Sync
 				parent_path = path
 				for path in dirs_paths
 					next if @ignore_by_path[path]
-					@dirs << [path, parent_path]
+					dirs << [path, parent_path]
 					# do not follow symlinks
 					# *this .symlink? is expensive (+30%)
-					unless File.symlink? path
+					unless File.symlink? base+path
 						tasks << path
 					end
 				end
 			end
 		end
 
-		tasks << @local_dir.path
 		do_in_parallel(tasks:tasks, wait:true) do |path|
 			get_dirs.(path)
 		end
-		 																																								# time_end2^get_nodes!
+		 																																								# time_end2^get_branch_dirs
 		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-		 																																								w("(get_nodes!) processed in #{'%.3f' % ttime}")
-																																										w(%Q{@dirs.n=}+@dirs.n.inspect)
+		 																																								w("(get_branch_dirs) processed in #{'%.3f' % ttime}")
+																																										w(%Q{dirs.n=}+dirs.n.inspect)
+		dirs
 	end
 
 	def update_file(file, file_d)
@@ -1037,7 +1181,6 @@ class Sync
 		end
 	end
 
-
 	def inspect
 		to_s
 	end
@@ -1050,14 +1193,17 @@ class Tree
 	include Helpers
 	@@id = 0
 																																							#~ Tree\
-	attr :sync, :hub, :db, :root_dir, :dirs, :state, :stats, :tdir_by_path, :all_dirs
-	def initialize(sync:nil, db:nil, dirs:nil)
+	# *@db — dir db
+	attr :sync, :hub, :db, :root_dir, :dirs, :state, :stats, :tdir_by_path, :all_dirs, :filter
+	def initialize(sync:nil, key:nil, db:nil, root_dir:nil, dirs:nil)
 		@sync = sync
-		@db = db
+		@key = key
+		@root_dir = root_dir
+		@db = db.tree_data
+		@filter = @sync.filter_for @key
 		@id = @@id += 1
 		@all_dirs = []
 		@tdir_by_path = {}
-		@root_dir = @sync.local_dir
 		@state = {
 			added: INodes.new,
 			changed: INodes.new,
@@ -1107,7 +1253,7 @@ class Tree
 		for d_path, dir_d in @db
 			parent_path = ::File.dirname d_path
 			parent_tdir = @tdir_by_path[parent_path]
-			tdir = @Dir.new d_path, parent_tdir:parent_tdir
+			tdir = @Dir.new d_path, base:@root_dir, parent_tdir:parent_tdir
 			@tdir_by_path[d_path] = tdir
 			@all_dirs << tdir
 		end
@@ -1116,7 +1262,7 @@ class Tree
 		for path, parent_path in dirs
 			parent_tdir = @tdir_by_path[parent_path]
 			begin
-				@tdir_by_path[path] ||= @Dir.new(path, parent_tdir:parent_tdir).tap do |tdir|
+				@tdir_by_path[path] ||= @Dir.new(path, base:@root_dir, parent_tdir:parent_tdir).tap do |tdir|
 					@all_dirs << tdir
 				end
 			rescue Errno::ENOENT
@@ -1138,20 +1284,27 @@ class Tree
 			dir.update
 		end
 
-		# calc total size
+		# calc total size (1/2)
 		@stats.files_added_size = @state.added.files.sum(&:size).hr
 		@stats.files_changed_size = @state.changed.files.sum(&:size).hr
 		# *we cannot get size of deleted file and we do not store it in file.d
 		# @stats.files_removed_size = @state.removed.files.sum(&:size).hr
 	end
 
+	# used in File to build path with a key
+	def key_
+		# *no key for the default tree
+		@key_ ||= @key == :dir_1 ? '' : "#{@key}:"
+	end
+
 	def save
 		#. *sorting needed for tests to compare results (after adding processing in threads)
 		@db.replace @db.sort.to_h if DirDB.dev?
 		@db.save
+		@filter.save
 	end
 	def inspect
-		to_s
+		"<#{self.class}: #{@key} >"
 	end
 end
 																																							#~ Tree/
@@ -1164,32 +1317,30 @@ class Tree::Dir < IDir
 																																							#~ Tree::Dir\
 	#- for class
 	class << self
+		attr :tree, :hub
 		def set_tree(tree)
-			@@tree = tree
-			@@hub = tree.hub
+			@tree = tree
+			@hub = tree.hub
 		end
 	end
 
-	attr :path, :d, :dirs, :tfiles, :filter, :parent_tdir
-	def initialize(dir_path, parent_tdir:nil)
+	attr :path, :tree, :d, :dirs, :tfiles, :filter, :parent_tdir
+	def initialize(dir_path, base:nil, parent_tdir:nil)
 		@parent_tdir = parent_tdir
-		super dir_path
+		super dir_path, base:base.abs_path
 		@path = dir_path
-		set_base @@tree.root_dir
 		@filter = DirFilter.new dir:self
 		@resolved = {}
-		@f_is_root_dir = self == @@tree.root_dir
+		@tree = self.class.tree
+		@hub = self.class.hub
+		@f_is_root_dir = self == @tree.root_dir
 		define_d
 	end
 
-	def tree
-		@@tree
-	end
-
 	def define_d
-		@d=@@tree.db[path] ||= begin
+		@d=@tree.db[path] ||= begin
 			if symlink?
-				@@hub.fire :dir_link_added, self
+				@hub.fire :dir_link_added, self
 																																										w("dir link added - #{self.inspect}")
 				{link:link.path}
 			else
@@ -1222,7 +1373,7 @@ class Tree::Dir < IDir
 			@tdirs = @d.dirs.keys.map do |dname|
 				#. *optimized way instead of using  self+dname
 				dpath = @f_is_root_dir ? dname : @path_+dname
-				@@tree.tdir_by_path[dpath]
+				@tree.tdir_by_path[dpath]
 					.tap {|_| @tdir_by_name[dname] = _ }
 			end
 		end
@@ -1233,11 +1384,11 @@ class Tree::Dir < IDir
 
 		# *this should be after @filter.init
 		if @f_new_dir && !@d.excluded
-			@@hub.fire :dir_added, self
+			@hub.fire :dir_added, self
 																																										w("dir added - #{self.inspect}")
 		end
 		# check current state
-		if exists? && !@@tree.sync.ignore_by_path[abs_path]
+		if exists? && !@tree.sync.ignore_by_path[abs_path]
 			@d.delete :deleted   # restore if was deleted
 			# update attrs
 			attrs.then do |_|
@@ -1251,8 +1402,10 @@ class Tree::Dir < IDir
 				if link.path != @d.link
 					@d.delete_keys! :dirs, :files
 					@d.link = link.path
-					@@hub.fire :dir_changed, self
+					@hub.fire :dir_changed, self
 				end
+				# *we do not save mtime for the root dir because for example in tests this dir is always changed and then
+				#   tree_data.dat is not matched with the version in the "good packs" (1/2)
 				@d.mtime = lmtime.to_i unless @f_is_root_dir
 			else
 				# dir_link > dir
@@ -1260,7 +1413,7 @@ class Tree::Dir < IDir
 					if @resolved.dir_ok
 						# convert to normal dir
 						@d.replace(dirs:{}, files:{})
-						@@hub.fire :dir_added, self
+						@hub.fire :dir_added, self
 						f_dir_ok = true
 																																											w("dir added - #{self.inspect}")
 					elsif @resolved.restore
@@ -1272,13 +1425,15 @@ class Tree::Dir < IDir
 					else
 						@f_broken = true
 						# *ask user for resolution
-						@@hub.fire :dir_link_broken, self
+						@hub.fire :dir_link_broken, self
 					end
 				else
 					f_dir_ok = true
 				end
 																																							#~ Tree::Dir
 				if f_dir_ok
+					# *we do not save mtime for the root dir because for example in tests this dir is always changed and then
+					#   tree_data.dat is not matched with the version in the "good packs" (2/2)
 					@d.mtime = mtime.to_i unless @f_is_root_dir
 					_ = fast_children full:true
 					files_names = _[:files_names]
@@ -1305,7 +1460,7 @@ class Tree::Dir < IDir
 							e = WinPathLimitError.new 'skipped due to Windows MAX_PATH limit'
 						end
 						file.d.error = e
-						@@hub.fire :file_skipped, file
+						@hub.fire :file_skipped, file
 																																										w("file skipped - #{file} (#{e.inspect})")
 					end
 					dirs_paths.each_with_index do |dir_path, i|
@@ -1317,8 +1472,8 @@ class Tree::Dir < IDir
 						# add new if needed
 						@tdir_by_name[dname] ||= begin
 							@d.dirs[dname] = 1
-							dir = @@tree.tdir_by_path[dir_path]
-							if !dir && !@@tree.state.dirs_skipped_by_path[dir_path]
+							dir = @tree.tdir_by_path[dir_path]
+							if !dir && !@tree.state.dirs_skipped_by_path[dir_path]
 								raise("folder not found in tdir_by_path: #{dir_path}")
 							end
 							@tdirs << dir
@@ -1349,7 +1504,7 @@ class Tree::Dir < IDir
 		update   # ensure updated
 		@d.deleted = {at:at}
 		@parent_tdir.d.dirs.delete name
-		@@hub.fire :dir_removed, self
+		@hub.fire :dir_removed, self
 																																										w("dir removed - #{self.inspect}")
 		# delete files
 		@tfiles.each &:delete
@@ -1364,7 +1519,7 @@ class Tree::Dir < IDir
 		# ignore if^@d.excluded
 		return if (@d.excluded)
 		@d.excluded = {at:at}
-		@@hub.fire :dir_excluded, @path, self
+		@hub.fire :dir_excluded, @path, self
 																																										w("dir_excluded - #{self.inspect}")
 	end
 	def excluded?
@@ -1400,7 +1555,7 @@ class Tree::File < IFile
 	def initialize(file_path, tdir:nil, excluded:nil)
 		@tdir = tdir
 		@excluded = excluded
-		super file_path
+		super file_path, base:@tdir.base
 		@path = file_path
 		@resolved = {}
 		@hub = @tdir.tree.hub
@@ -1450,7 +1605,7 @@ class Tree::File < IFile
 				@d.excluded = {at:at}
 				# update chunks
 				@d.versions.and.each do |_|
-					Chunk[_].unbind_file path
+					Chunk[_].unbind_file key_path
 				end
 				@d.delete_keys! :mtime, :versions
 			end
@@ -1566,12 +1721,12 @@ class Tree::File < IFile
 																																									w("file link broken - #{self.inspect}")
 					end
 				# if modified
-				elsif mtime.to_i != @d.mtime
+				elsif mtime.to_i != @d.mtime || @f_force_update && key != @d.versions.last
 					# update file data
 					@d.mtime = mtime.to_i
 					if key != @d.versions.last
 						#. unbind from current chunk
-						Chunk[@d.versions.last].and.unbind_file path
+						Chunk[@d.versions.last].and.unbind_file key_path
 						@d.versions << key
 						@hub.fire :file_changed, self
 																																										w("file changed - #{self.inspect}")
@@ -1586,9 +1741,12 @@ class Tree::File < IFile
 		@f_broken = true
 	end
 																																							#~ Tree::File
+	def key_path
+		@key_path ||= "#{@tdir.tree.key_}#{@path}"
+	end
 	def chunk
 		Chunk[key].tap do |_|
-			_.and.bind_file path
+			_.and.bind_file key_path
 		end
 	end
 	def create_chunk
@@ -1607,7 +1765,7 @@ class Tree::File < IFile
 		# *link doesn't have chunks
 		# *це нам дасть можливість підрахувати скільки у паках видалених даних
 		@d.versions.and.each do |_|
-			Chunk[_].and.unbind_file path
+			Chunk[_].and.unbind_file key_path
 		end
 	end
 	def as_file?
@@ -1742,6 +1900,7 @@ class Filter
 				set_rule **data2
 			end
 		end
+		@f_was_empty = @rules.empty?
 		self
 	end
 	def reset
@@ -1756,7 +1915,8 @@ class Filter
 	end
 	def save
 		@db.filter.rules = @rules.map &:data
-		@db.filter.save
+		# *do not save empty file
+		@db.filter.save unless @rules.empty? && @f_was_empty
 	end
 end
 																																							#~ Filter/
@@ -1808,7 +1968,7 @@ class DirFilter
 		@active_rules ||= begin
 			f_dir_was_excluded = @dir.excluded?
 			f_dir_excluded = false
-			rules_to_check = Sync.global_filter.rules + @dir.tree.sync.filter.rules + children_rules
+			rules_to_check = Sync.global_filter.rules + @dir.tree.sync.filter.rules + @dir.tree.filter.rules + children_rules
 			dir_rules = rules_to_check.select do |rule|
 				path =
 					if rule.base_dir
@@ -2074,8 +2234,9 @@ end
 
 class StorageHelper
 	# *@sync — can be Sync class or Sync instance
-	def initialize(sync:nil)
+	def initialize(sync:nil, in_storage_dir:nil)
 		@sync = sync
+		@in_storage_dir = in_storage_dir
 		@db = @sync.db.storages
 	end
 
@@ -2098,7 +2259,7 @@ class StorageHelper
 					end
 				end
 
-				map[key] = Storage[key].new **o.merge(key:key, sync_db:@sync.db)
+				map[key] = Storage[key].new **o.merge(key:key, set:@sync.set, in_storage_dir:@in_storage_dir)
 			end
 			raise NoDefinedStoragesError, '(storages) there are no defined storages' if map.empty?
 																																										w("using storages: #{map.keys} (#{map.length}/#{@db.length})")
@@ -2127,13 +2288,9 @@ class StorageHelper
 	#   otherwise .fast_one will fail with a timeout error
 	def prepare
 		storages.each do |key, storage|
-			# *storages like LocalFS will be skipped
-			# *if we have dir_id, usually it means that we already have tokens, so do not do anything here to do not slowdown operation with one-by-one storage init
-			if storage.db && !storage.db.dir_id
-				# *will cause auth if token missed
 																																										w("[prepare #{key}]")
-				storage.storage_dir
-			end
+			# *will cause auth if token missed
+			storage.storage_dir
 		end
 	end
 
@@ -2153,7 +2310,6 @@ class StorageHelper
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 			# *added to Shared.skip_root_nodes
 			tmp_dir = (@sync.start_dir/:z_tmp_fast_one).create
-			arr = []
 			n = 0
 			require 'timeout'
 			Timeout.timeout 10 do
@@ -2161,10 +2317,8 @@ class StorageHelper
 					# download base.dat as tmp file
 					file = tmp_dir/"test_#{key}.tmp"
 					some_storage.get 'base.dat', to:file
-					data = eval(file.read) rescue {}
-					data.storage = some_storage
-					data.n = n += 1
-					arr << data
+					some_storage.base_data = eval(file.read) rescue {}
+					some_storage.base_data.n = n += 1
 					file.del!
 
 				rescue Errno::ENOENT, KnownError
@@ -2173,12 +2327,14 @@ class StorageHelper
 					:skip
 				end
 
-				raise KnownError, '(fast_one) error: all storages skipped (base.dat missed)' if arr.empty?
+				raise KnownError, '(fast_one) error: all storages skipped (base.dat missed)' if n == 0
 			end
 			# get the fastest of storages with the latest data
-			arr
-				.sort_by {|_| [-_.last_up_at, _.n] }
-				.first.storage
+			# *we do not compare .last_pack_id because only folders could be created/deleted and new pack is not created in such case
+			#   also for global db there is no last_pack_id
+			storages.values
+				.sort_by {|_| [-_.base_data.last_up_at, _.base_data.n] }
+				.first
 					.tap do |_|
 						:log
 																																										w("fast_one storage: #{_.key}")

@@ -177,6 +177,11 @@ class Ruby7Zip < ZipEngine
 			for file in dir.files
 				zip.add_file file, as:file.name
 			end
+			dir.dirs.each do |subdir|
+				dir.in do
+					zip.add_directory subdir.path
+				end
+			end
 		end
 	end
 	# zip = StringIO.new IFile.new('R:\remote\.db.7z').binread

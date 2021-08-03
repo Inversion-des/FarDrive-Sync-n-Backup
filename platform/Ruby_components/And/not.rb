@@ -18,20 +18,26 @@ module Not
 		end
 		alias :isnt not
 	end
-	
-	class InverseReturner
+
+	# *we should inherit from BasicObject to ensure that any method call will go to method_missing
+	#   fixed: hash? returned always false because it was called for InverseReturner instance and not for @obj
+	class InverseReturner < BasicObject
 		def initialize(obj)
 			@obj = obj
 		end
 
-		# *in? extend Object so we have to redefine it here
-		def in?(*args)
-			!@obj.in?(*args)
-		end
 		def method_missing(*args)
-			return false if (@obj == nil && args[0] == :empty?)
-			return nil if @obj == nil || @obj.is_a?(And::NilReturner)
+#$>.puts '---------------'
+#::Kernel.p @obj
+			return false if (@obj.nil? && args[0] == :empty?)
+			return nil if @obj.nil? || @obj.is_a?(::And::NilReturner)
+#::Kernel.p args
+#::Kernel.p @obj.send(*args)
 			!@obj.send(*args)
+		end
+
+		def inspect
+			"<Not::InverseReturner>"
 		end
 	end
 end

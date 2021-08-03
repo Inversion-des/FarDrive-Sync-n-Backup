@@ -4,7 +4,7 @@
 module And
 	module ObjExtension
 		def and
-			self == nil ? NilReturner.new : self
+			self.nil? ? NilReturner.new : self
 		end
 		alias :is and
 	end
