@@ -2025,11 +2025,14 @@ class DirFilter
 			end
 			active_rules = inherited_rules + dir_rules
 			active_rules.sort_by! &:n
+																																										#-#!_ o^active_rules
 			# do not add this dir if exclude branch detected
-			active_rules.last.and.then do |_|
+			active_rules.each do |_|
 				# * here '*' is not the same as '*.*' because latter will skip files w/o extension
-				if _.exclude_files == ['*'] && _.include_files.empty? && _.with_subdirs?
+				if !f_dir_excluded && _.exclude_files == ['*'] && _.include_files.empty? && _.with_subdirs?
 					f_dir_excluded = true
+				elsif f_dir_excluded && !_.include_files.empty?
+					f_dir_excluded = false
 				end
 			end
 			if f_dir_excluded && !f_dir_was_excluded
