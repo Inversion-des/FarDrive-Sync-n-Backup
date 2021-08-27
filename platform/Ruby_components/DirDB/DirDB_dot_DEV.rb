@@ -32,9 +32,11 @@ class DirDB
 		@f_prod
 	end
 
-	def initialize(dname=nil, dir:Dir.pwd, load:true)
+	# *bin — in prod use Marshal dump/load for these files (name, no ext)
+	def initialize(dname=nil, dir:Dir.pwd, load:true, bin:[])
 		@dname = dname&.to_s || C_default_dir
 		@dir = IDir.new dir
+		@bin = bin.create_index
 		@ext = '.dat'
 		@data_by_name = {}
 		self.load if load
@@ -52,7 +54,7 @@ class DirDB
 	def filter_map(&blk)
 		@data_by_name.filter_map &blk
 	end
-	
+
 	def dir
 		@dir/@dname
 	end
@@ -88,14 +90,27 @@ class DirDB
 
 	def load(only_name=nil)
 		# ensure dir exists
-		@dir.create
-		@dir.in do
+		@dir.create.in do
 			# for each .dat file in the @dname (ignore subdirs)
 			Dir.glob((only_name||'*')+@ext, base:@dname) do |fname|
 				if name=File.basename(fname, @ext)
-					# *binread here causes errors like:
-					# `encode': "\\xC2" to UTF-8 in conversion from ASCII-8BIT to UTF-8 to UTF-16LE (Encoding::UndefinedConversionError)
-					self.send name+'=', eval(File.read @dname+'/'+fname)
+					path = @dname+'/'+fname
+					if @bin[name] && DirDB.prod?
+						begin
+							# *if there is a saved inspect (old format) there will be error:
+							#  incompatible marshal file format (can't be read)
+							#  so we will fallback to eval
+							data = Marshal.load(File.binread path)
+						rescue TypeError
+							puts "Marshal.load failed for #{name}, falling back to eval"
+						end
+					end
+					if !data
+						# *binread here causes of errors like:
+						# `encode': "\\xC2" to UTF-8 in conversion from ASCII-8BIT to UTF-8 to UTF-16LE (Encoding::UndefinedConversionError)
+						data = eval(File.read path)
+					end
+					self.send name+'=', data
 				end
 			end
 		end
@@ -154,8 +169,14 @@ class DirDB
 						require 'pp'
 						PP.pp data, f, 150
 					else
-						# *saves with CRLF on Win
-						f.write data.inspect
+						if @bin[name]
+							# {}.replace is a workaround for the error  singleton can't be dumped (TypeError)
+							#  caused by changes for the hash in .add_save!
+							Marshal.dump({}.replace(data), f)
+						else
+							# *saves with CRLF on Win
+							f.write data.inspect
+						end
 					end
 				end
 				# replace the original if all is ok

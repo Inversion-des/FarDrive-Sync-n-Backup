@@ -117,6 +117,7 @@ class Storage
 
 	def get(name, to:nil)
 		with_long_call_warns title:"get - #{name}" do
+			# *to can be nil for example in LocalFS, where we just return the ori file and do not copy it to the temp 'to' file (to_file is not used in that case)
 			if to
 				to_file = to.is_a?(IDir) ? to/name : IFile.new(to)
 			end
@@ -366,7 +367,15 @@ class Storage::GoogleDrive < Storage
 		super do |to_file|
 			file = target_dir.file_by_title name
 			raise KnownError, "(GoogleDrive - #{@account}) file not found: #{name}" if !file
-			file.download_to_file to_file.to_s
+			# *attempt with acknowledge_abuse needed to allows downloading of files infected with a virus
+			#  otherwise service will return Invalid request (Google::Apis::ClientError) with Forbidden in details
+			#  https://github.com/gimite/google-drive-ruby/issues/413
+			begin
+				file.download_to_file to_file.to_s
+			rescue Google::Apis::ClientError
+				print "[get retry for '#{name}' - #{$!}]"
+				file.download_to_file to_file.to_s, acknowledge_abuse:true
+			end
 			to_file
 		end
 	end

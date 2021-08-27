@@ -177,6 +177,8 @@ class App
 			when '-storage_sync'
 				require_relative 'Storage/_Storage'
 
+				sync.h_storage.use @storages
+
 				Storage.sync(
 					from: sync.h_storage[:LocalFS],
 					to: sync.h_storage[:GoogleDrive_2]

@@ -441,9 +441,12 @@ class IDir < IPath
 			if abs_path == Dir.pwd
 				raise "Cannot delete current pwd: #{abs_path}"
 			else
+				# *this can fail with Errno::ENOTEMPTY (Directory not empty) if there are locked files in the dir
 				delete
 			end
 		end
+	rescue Errno::ENOTEMPTY
+		puts "Cannot delete dir, probably some files are locked: #{abs_path}"
 	end
 
 	def clear!
@@ -467,7 +470,7 @@ class IDir < IPath
 	end
 																																							#~ IDir
 	# nodes = @src_dir.all_nodes
-	#	  reject_by_start: [@db.dir, @tmp_dir.name, 'w.txt']
+	#	  reject_by_start: [@db.dir, @tmp_dir.name, 'w.txt'] | '.db'
 	# << INodes
 	def all_nodes(reject_by_start:nil)
 		# *glob returns [IDir/IFile], not INodes, and set_base not applied
@@ -477,6 +480,7 @@ class IDir < IPath
 			.then {|_| dirs_files _ }
 			.tap do |_|
 				if reject_by_start
+					reject_by_start = [reject_by_start].flatten
 					# reject by the first dir or a root file name
 					_.reject! {|_| _.path_first_part.in? reject_by_start }
 				end
@@ -484,11 +488,19 @@ class IDir < IPath
 	end
 
 	# << array of strings
+	#	  reject_by_start: [@db.dir, @tmp_dir.name, 'w.txt'] | '.db'
 	def clear_glob(reject_by_start:nil)
 		self
 			.glob('**/*', File::FNM_DOTMATCH)
 			.reject {|_| _.name == '.' || _ == pn }
 			.map {|_| _.relative_path_from(self).path }
+			.tap do |_|
+				if reject_by_start
+					reject_by_start = [reject_by_start].flatten
+					# reject by the first dir or a root file name
+					_.reject! {|_| _.partition('/')[0].in? reject_by_start }
+				end
+			end
 	end
 
 	# << INodes
@@ -551,7 +563,8 @@ class IDir < IPath
 		if path.chomp! '/'
 			f_copy_content = true
 			# *symlinks are copied (relative dir links become broken)
-			FileUtils.copy_entry path, self, preserve=true, dereference_root=false, remove_destination=false
+			# *remove_destination=false — causes Errno::EACCES (Permission denied) if the destination file is readonly
+			FileUtils.copy_entry path, self, preserve=true, dereference_root=false, remove_destination=true
 		else
 			f_copy_content = true unless exists?
 			FileUtils.cp_r path, self, preserve:true, dereference_root:false
@@ -600,7 +613,8 @@ class IDir < IPath
 	# copy content of a dir, not the dir itself
 	def copy_to(dest)
 		dest.create
-		FileUtils.copy_entry self, dest, preserve=true, dereference_root=false, remove_destination=false
+		# *remove_destination=false — causes Errno::EACCES (Permission denied) if the destination file is readonly
+		FileUtils.copy_entry self, dest, preserve=true, dereference_root=false, remove_destination=true
 		self
 	end
 	alias :>> copy_to
@@ -686,6 +700,8 @@ class IFile < IPath
 			print ','
 			if dest.is_a? IDir
 				(dest/name).del!
+			else
+				FileUtils.rm dest.to_s, force:true
 			end
 			retry
 		end

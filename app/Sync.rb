@@ -155,13 +155,16 @@ class Sync
 	def Sync.db_up
 		Sync.h_storage.prepare   # *this can raise NoDefinedStoragesError
 		# *base.dat needed for h_storage.fast_one
-		@db.base.tap do |_|
+		db.base.tap do |_|
 			_.last_up_at = at
 			_.save
 		end
-		files = @db.filter_map do |k, v|
+		files = db.filter_map do |k, v|
 			next if k == 'device'   # device.dat should not be synced
-			db_dir/"#{k}.dat"
+			file = db_dir/"#{k}.dat"
+			# *files for some keys can be not created yet
+			next if file.not.exists?
+			file
 		end
 		# upload to the root dir instead of set_dir
 		Sync.h_storage.for_each {|_| _.add_update_many files }
@@ -251,7 +254,7 @@ class Sync
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 		Sync.db   # init
-		@db = DirDB.new set_dir_name, dir:'.db/sets'
+		@db = DirDB.new set_dir_name, dir:'.db/sets', bin: ['data_by_file_key']
 		@db_fn = '#set_db.7z'   # how set db will be saved on the storage
 																																										# time_end2^@db.load
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
@@ -394,7 +397,7 @@ class Sync
 			@local_dirs.each do |key, dir|
 				dirs = get_branch_dirs dir
 				@dirs += dirs
-				db = DirDB.new key, dir:@db.dir   # dir db
+				db = DirDB.new key, dir:@db.dir, bin: ['tree_data']   # dir db
 				tree = build_tree key, dir, dirs, db
 				@trees[key] = tree
 
@@ -454,10 +457,11 @@ class Sync
 		wait_for_results
 		@f_set_first_run = false
 	end
+																																							#~ up/
 
 	def wait_for_results
 		# wait for status update from the thread
-		loop do |_|
+		loop do
 			sleep 0.2
 			if @status.f_done
 				break
@@ -474,7 +478,6 @@ class Sync
 			end
 		end
 	end
-																																							#_ up_inc/
 
 	# -down
 	def down
@@ -530,10 +533,10 @@ class Sync
 		up_db_dir = @tmp_dir/:up_db
 		StringIO.open(up_db_file.binread) do |zip|
 			ZipCls.new(zip:zip).unpack_all to:up_db_dir
-			@up_db = DirDB.new up_db_dir.abs_path
+			@up_db = DirDB.new up_db_dir.abs_path, bin: ['data_by_file_key']
 			# *load only needed subdirs, not all unpacked
 			for key in @local_dirs.keys
-				@local_dirs_up_db_by_key[key] = DirDB.new key, dir:up_db_dir
+				@local_dirs_up_db_by_key[key] = DirDB.new key, dir:up_db_dir, bin: ['tree_data']
 			end
 		end
 		 																																								# time_end2^db unpack and load
@@ -544,7 +547,7 @@ class Sync
 		#-- process dirs list
 		skipped_due_to_max_path = INodes.new
 		@local_dirs.each do |local_dir_key, local_dir|
-			db = DirDB.new local_dir_key, dir:@db.dir
+			db = DirDB.new local_dir_key, dir:@db.dir, bin: ['tree_data']
 			tree_data = db.tree_data
 			up_db = @local_dirs_up_db_by_key[local_dir_key]
 			nodes_processed_by_path = {}
@@ -563,7 +566,11 @@ class Sync
 			end
 
 			do_in_parallel(tasks:tasks) do |dir, dir_path, dir_up_d|
-				next if dir_up_d.excluded
+				# *08.08.21: now we do not save .excluded dirs in db
+#				if dir_up_d.excluded
+#					nodes_processed_by_path[dir_path] = 1   # prevents deletion of this folder
+#					next
+
 				while !dir.parent.exists?
 					# retry few times (it can be created in a parallel thread)
 					attempt ||= 0
@@ -760,24 +767,22 @@ class Sync
 				res.retry.()
 			end
 			# process local tree — delete not marked nodes
-			# *proc needed to localize vars: dir, file
-			proc do
-				for dir_path, dir_d in tree_data
-					dir = IDir.new dir_path
-					if !nodes_processed_by_path[dir_path]
-						dir.del!
-						next
-					end
-					next if dir_d.link   # do not process files in symlinks
-					for fname, file_d in dir_d.files
-						file = dir/fname
-						if !nodes_processed_by_path[file.path]
-							file.del!
-						end
-					end
-				end
-			end.()
-																																										w(%Q{files_to_download_queue.n=}+files_to_download_queue.n.inspect)
+			# 08.08.21: do not delete not marked nodes, delete only nodes that have .deleted in up_db
+#			# *proc needed to localize vars: dir, file
+#			proc do
+#				for dir_path, dir_d in tree_data
+#																																											##!_ trace^dir_d
+#					dir = IDir.new dir_path
+#					if !nodes_processed_by_path[dir_path]
+#						dir.del!
+#						next
+#					next if dir_d.link   # do not process files in symlinks
+#					for fname, file_d in dir_d.files
+#						file = dir/fname
+#						if !nodes_processed_by_path[file.path]
+#							file.del!
+#			end.()
+			 																																							w(%Q{files_to_download_queue.n=}+files_to_download_queue.n.inspect)
 																																							#~ down
 			@stats.files_downloaded = files_to_download_queue.n
 																																										# time_end2^state scan
@@ -1022,9 +1027,14 @@ class Sync
 						total_files_size = zip.files.sum &:size
 						pack_id += 1
 						# ID_dateFrom-dateTo
+						# ID_dateFrom (if dateTo is the same)
 						pack_name = pack_id.to_s
+						last_date_part = nil
 						[zip.files.first, zip.files.last].each do |_|
-							pack_name += '_' + _.mtime.strftime("%Y.%m.%d")
+							date_part = _.mtime.strftime("%Y.%m.%d")
+							next if date_part == last_date_part
+							last_date_part = date_part
+							pack_name += '_' + date_part
 						end
 						pack_fn = pack_name+'.7z'
 						pack_file = @tmp_dir/pack_fn
@@ -1178,6 +1188,7 @@ class Sync
 			w '  2) Open it (UAC elevation required) and then delete it.'
 			w '  3) Now close the current sync process and run the operation again — it should now redo those skipped items.'
 			w '  You can read more about this solution here: https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=cmd#enable-long-paths-in-windows-10-version-1607-and-later'
+			w ''
 		end
 	end
 
@@ -1298,6 +1309,9 @@ class Tree
 	end
 
 	def save
+		# *do not save excluded dirs in db because there can be many tmp dirs and we do not clrear them from db
+		@db.reject! {|k, v| v.excluded }
+
 		#. *sorting needed for tests to compare results (after adding processing in threads)
 		@db.replace @db.sort.to_h if DirDB.dev?
 		@db.save
@@ -1485,9 +1499,9 @@ class Tree::Dir < IDir
 				end
 			end
 
-			if @parent_tdir&.excluded?
-				exclude
-			end
+			# *seems like this was redundant but breaks some logic if nested dir is included
+#			if @parent_tdir&.excluded?
+#				exclude
 
 		# if deleted
 		else
@@ -1519,8 +1533,10 @@ class Tree::Dir < IDir
 		# ignore if^@d.excluded
 		return if (@d.excluded)
 		@d.excluded = {at:at}
-		@hub.fire :dir_excluded, @path, self
+		if !@f_new_dir
+			@hub.fire :dir_excluded, @path, self
 																																										w("dir_excluded - #{self.inspect}")
+		end
 	end
 	def excluded?
 		@d.excluded
@@ -1932,6 +1948,7 @@ class DirFilter
 		active_rules   # cache
 	end
 
+	# check file
 	def excludes?(fname)
 																																										#-#!_ o^active_rules
 		f_excluded = false
@@ -1941,7 +1958,10 @@ class DirFilter
 				for pattern in rule.exclude_files
 					# *File::FNM_EXTGLOB needed for {a,b,c} support
 					# *File::FNM_DOTMATCH needed to match files starting with '.'
-					if File.fnmatch(pattern, fname, File::FNM_EXTGLOB|File::FNM_DOTMATCH | File::FNM_DOTMATCH)
+					flags = File::FNM_EXTGLOB | File::FNM_DOTMATCH | File::FNM_DOTMATCH
+					# *ignore case for patterns like: '*.txt' (filter by extension)
+					flags |= File::FNM_CASEFOLD if pattern =~ /^\*\.\w+$/
+					if File.fnmatch(pattern, fname, flags)
 						f_excluded = true
 					end
 				end
@@ -1969,6 +1989,7 @@ class DirFilter
 			f_dir_was_excluded = @dir.excluded?
 			f_dir_excluded = false
 			rules_to_check = Sync.global_filter.rules + @dir.tree.sync.filter.rules + @dir.tree.filter.rules + children_rules
+																																										#-#!_ o^rules_to_check
 			dir_rules = rules_to_check.select do |rule|
 				path =
 					if rule.base_dir
@@ -2185,6 +2206,11 @@ class Rule
 			end
 		end
 
+		# normalize to / in path
+		@dir_paths.and.each do |path|
+			path.gsub!(/\\/, '/') if path.includes? '\\'
+		end
+
 		if @only_files
 			@exclude_files = '*'
 			@include_files = @only_files
@@ -2266,7 +2292,12 @@ class StorageHelper
 			end
 			raise NoDefinedStoragesError, '(storages) there are no defined storages' if map.empty?
 																																										w("using storages: #{map.keys} (#{map.length}/#{@db.length})")
-																																										w("rejected storages: #{@db.keys - map.keys}")
+			rejected_storages = @db.keys - map.keys
+			if rejected_storages[0]
+																																										w("rejected storages: #{rejected_storages}")
+				:list
+			end
+
 			map
 		end
 	end
