@@ -21,8 +21,7 @@ The simples storage config looks like:
 	}
 }
 ```
-5. Now in the main dir you can open cmd and do `run -up` and `run -down`.  
-A special `.db` dir will be added to the backup dir (`@local_1`) initially.
+5. Now in the main dir you can open cmd and do `run -up` and `run -down`.
 
 
 ## I need more
