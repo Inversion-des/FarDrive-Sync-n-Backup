@@ -18,4 +18,5 @@ gem 'google_drive', github: 'Inversion-des/google-drive-ruby'
 group :dev, optional: true do
 	gem 'rspec'
 	gem 'timecop'
+	gem 'bootsnap'
 end

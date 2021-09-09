@@ -110,7 +110,7 @@ class App
 				sync.filter.save
 
 
-			# update global filter (db_global/filter.dat)
+			# update global filter (.db/filter.dat)
 			# CMD: run -update_global_filter
 			when '-update_global_filter'
 				Sync.global_filter.reset
@@ -135,7 +135,7 @@ class App
 				Sync.global_filter.save
 
 
-			# backup db_global dir (global filter, storage tokens)
+			# backup .db dir (global filter, storage tokens)
 			# CMD: run -db_global_sync_up
 			when '-db_global_sync_up'
 				Sync.h_storage.set(
@@ -151,7 +151,7 @@ class App
 				Sync.db_up
 
 
-			# set uniq device ID (db_global/base.dat)
+			# set uniq device ID (.db/base.dat)
 			# *needed only to define custom storage maps for each device or change some paths
 			# CMD: run -set_device_id home_PC
 			when '-set_device_id'
@@ -159,17 +159,59 @@ class App
 				Sync.db.device.save
 
 
-			# define storages (.db/storages.dat)
+			# define storages (.db/sets/#def_set/storages.dat)
 			# CMD: run -set_storages
 			when '-set_storages'
-				sync.h_storage.set(
-					LocalFS: {
-						dir_path: 'F:/FarDrive_storage'
-					},
-					GoogleDrive: {
-						account: 'yura.des@gmail.com'
-					}
-				)
+
+				if :simple
+					# simple single storages sample
+					sync.h_storage.set(
+						LocalFS: {
+							dir_path: 'F:/FarDrive_storage'
+						},
+						GoogleDrive: {
+							account: 'yura.des@gmail.com'
+						}
+					)
+
+				elsif !:arrays
+					# 2 storage arrays sample
+					sync.h_storage.set(
+						array_1: {
+							_config: {
+								only_for: 'home_PC'
+								# default strategy: even
+							},
+							LocalFS: {
+								dir_path: 'F:/FarDrive_storage',
+								quota_MB: 700
+							},
+							LocalFS_2(
+								dir_path: 'G:/FarDrive_storage',
+								quota_GB: 20
+							)
+						},
+						array_2: {
+							_config: {
+								strategy: 'one_by_one',
+								order: [:GoogleDrive_1, :GoogleDrive_2, :GoogleDrive_3],
+								skip_for: 'nout'
+							},
+							GoogleDrive_1: {
+								account: 'yura.des@gmail.com',
+								quota_GB: 10
+							},
+							GoogleDrive_2: {
+								account: 'other@gmail.com',
+								quota_GB: 15
+							},
+							GoogleDrive_3: {
+								account: 'third@gmail.com',
+								quota_GB: 12
+							}
+						}
+					)
+				end
 
 
 			# hepler to upload files to the new added storage (in case of GoogleDrive it is important that all the files are created by the app)

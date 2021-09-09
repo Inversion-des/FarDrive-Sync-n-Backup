@@ -458,7 +458,6 @@ class Sync
 		@f_set_first_run = false
 	end
 																																							#~ up/
-
 	def wait_for_results
 		# wait for status update from the thread
 		loop do
@@ -534,6 +533,13 @@ class Sync
 		StringIO.open(up_db_file.binread) do |zip|
 			ZipCls.new(zip:zip).unpack_all to:up_db_dir
 			@up_db = DirDB.new up_db_dir.abs_path, bin: ['data_by_file_key']
+			# update storage db if needed
+			if @up_db.storages.not.empty?
+				h_storage.use @up_db.storages
+				h_storage.prepare
+				# *without this parallel call of .fast_one fails
+				h_storage.fast_one
+			end
 			# *load only needed subdirs, not all unpacked
 			for key in @local_dirs.keys
 				@local_dirs_up_db_by_key[key] = DirDB.new key, dir:up_db_dir, bin: ['tree_data']
@@ -922,7 +928,6 @@ class Sync
 		@tmp_dir.and.del!
 	end
 																																							#~ down/
-
 	# *db — dir db
 	def build_tree(key, dir, dirs, db)
 																																										w("-- build_tree (#{key}) --")
@@ -1088,6 +1093,9 @@ class Sync
 		Chunks.save
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+		# *should be before packing #set_db.7z
+		h_storage.balance_if_needed
+		h_storage.save_db
 
 		@db.base.tap do |_|
 			_.last_up_at = at
@@ -1113,7 +1121,6 @@ class Sync
 		 																																								w("(update and backup db) processed in #{'%.3f' % ttime}")
 	end
 																																							#~ make_packs!/
-
 	def get_branch_dirs(dir)
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -1824,7 +1831,6 @@ class Tree::File < IFile
 	end
 end
 																																							#~ Tree::File/
-																																							#~ Tree::File/
 
 
 
@@ -2269,26 +2275,31 @@ class StorageHelper
 		@db = @sync.db.storages
 	end
 
+	# < array of Storage || StorageArray
 	def storages
 		@storages ||= begin
 			require_relative 'Storage/_Storage'
+			require_relative 'Storage/_StorageArray'
 			map = {}
 			@db.each do |key, o|
-				if o.only_for
-					o.only_for = [o.only_for].flatten
-					unless o.only_for.includes? Sync.device
+				f_array = h_array_key? key
+				if only_for=( f_array ? o._config.and.only_for : o.only_for )
+					only_for = [only_for].flatten
+					unless only_for.includes? Sync.device
 						next
 					end
 				end
 
-				if o.skip_for
-					o.skip_for = [o.skip_for].flatten
-					if o.skip_for.includes? Sync.device
+				if skip_for=( f_array ? o._config.and.skip_for : o.skip_for )
+					skip_for = [skip_for].flatten
+					if skip_for.includes? Sync.device
 						next
 					end
 				end
 
-				map[key] = Storage[key].new **o.merge(key:key, set:@sync.set, in_storage_dir:@in_storage_dir)
+				map[key] = f_array \
+					? (StorageArray.new(key:key, set:@sync.set, db:o))
+					: (Storage[key].new **o.merge(key:key, set:@sync.set, in_storage_dir:@in_storage_dir))
 			end
 			raise NoDefinedStoragesError, '(storages) there are no defined storages' if map.empty?
 																																										w("using storages: #{map.keys} (#{map.length}/#{@db.length})")
@@ -2315,7 +2326,32 @@ class StorageHelper
 
 	# *db not saved
 	def use(conf)
+		# save files_map for arrays
+		files_map_by_array_key = {}
+		@db.each do |key, o|
+			if h_array_key? key
+				files_map_by_array_key[key] = o._files_map
+			end
+		end
+
 		@db.replace conf
+
+		# restore files_map for arrays if needed (_files_map: nil — can be used to initiate auto-discovery)
+		@db.each do |key, o|
+			if h_array_key? key
+				if !o.has_key? :_files_map
+					_ = files_map_by_array_key[key]
+					o._files_map = _ if _
+				end
+			end
+		end
+
+		flush
+	end
+
+	def flush
+		@storages = nil
+		@fast_one = nil
 	end
 
 	# *if tokens missed — auth needed, so it is better to do it before any other operations and do it not in parallel for clear workflow
@@ -2356,7 +2392,7 @@ class StorageHelper
 					file.del!
 
 				rescue Errno::ENOENT, KnownError
-																																										w("(#{key}) error: #$!")
+																																										w("(#{key}) error: #{$!.inspect}")
 					# *do not use storage if base.dat is missed there
 					:skip
 				end
@@ -2380,8 +2416,25 @@ class StorageHelper
 			tmp_dir&.del!
 		end
 	end
-end
 
+	def balance_if_needed
+		storages.values.each do |_|
+			_.balance_if_needed if _.is_a? StorageArray
+		end
+	end
+
+	def save_db
+		# *simple storage is saved in .set
+		if storages.values.any? {|_| _.is_a? StorageArray }
+			@db.save
+		end
+	end
+
+	def h_array_key?(key)
+		key.start_with? 'array_'
+	end
+end
+																																							#~ StorageHelper/
 
 
 Shared = {}

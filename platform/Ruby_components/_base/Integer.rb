@@ -9,6 +9,19 @@ class Numeric
 	def limit_max(max)
 		[self, max].min
 	end
+
+	# -size
+	# storage size -> bytes
+	# 5.MB, 1.GB
+	def KB
+		(self*1024).to_i
+	end
+	def MB
+		(self*1024.KB).to_i
+	end
+	def GB
+		(self*1024.MB).to_i
+	end
 end
 
 
@@ -45,19 +58,6 @@ class Integer
 
 	def to_time
 		Time.at self
-	end
-
-	# -size
-	# storage size -> bytes
-	# 5.MB, 1.GB
-	def KB
-		self*1024
-	end
-	def MB
-		self*1024.KB
-	end
-	def GB
-		self*1024.MB
 	end
 
 	# readable file size

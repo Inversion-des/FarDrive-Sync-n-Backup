@@ -17,3 +17,16 @@ module Boolean; end
 Bool = Boolean   # alias
 class TrueClass; include Boolean; end
 class FalseClass; include Boolean; end
+
+class Mutex
+	alias :sync synchronize
+	def sync_if_needed
+		if owned?
+			yield
+		else
+			synchronize do
+				yield
+			end
+		end
+	end
+end

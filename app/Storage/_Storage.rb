@@ -16,10 +16,11 @@ class Storage
 			raise NameError unless self.constants.includes? name.to_sym
 			self.const_get name
 		rescue NameError
-			raise NameError, "#{name} class not found in #{self}"
+			raise NameError, "'#{name}' class not found in #{self}"
 		end
 		
 		# Storage.sync(from:, to:)
+		# from/to: Storage || StorageArray
 		def sync(from:nil, to:nil)
 			# get files in parallel
 			files = {}
@@ -40,6 +41,7 @@ class Storage
 						found_file.size == file.size
 					end
 				end
+			add_files.sort_by! &:name
 			del_files =
 				files[to].reject do |file|
 					# skip if such file should exist
@@ -51,10 +53,15 @@ class Storage
 			# *'z_tmp_sync' added to Shared.skip_root_nodes
 			# *we do not use tmp files if reading from LocalFS
 			tmp_dir = from.is_a?(LocalFS) ? nil : IDir.new(:z_tmp_sync).create   # dir is usually created in the project local dir
-			from.do_in_parallel(tasks:add_files) do |add_file|
+			process_file = -> (add_file) do
 				file = from.get(add_file.name, to:tmp_dir)
 				to.add_update file
 				print '.'
+			end
+			if from.is_a? Storage
+				from.do_in_parallel tasks:add_files, &process_file
+			else   # not in parallel for StorageArray
+				add_files.each &process_file
 			end
 		
 			{add_files:add_files, del_files:del_files}
@@ -179,13 +186,20 @@ class Storage
 			end
 		end.each &:join
 	end
-end
 
 	# + normalize file api (see in Storage::GoogleDrive)
+
+	# Error^NoFreeSpace < KnownError
+	class NoFreeSpace < KnownError;end
+	# Error^FileNotFound < KnownError
+	class FileNotFound < KnownError;end
+end
+
 
 
 #! should be is separate file
 class Storage::LocalFS < Storage
+																																							#~ LocalFS\
 	def initialize(key:nil, dir_path:nil, set:nil, **o)
 		@key = key
 		@dir_path = dir_path
@@ -210,6 +224,7 @@ class Storage::LocalFS < Storage
 	def get(name, to:nil)
 		super do |to_file|
 			file = target_dir/name
+			raise FileNotFound, "(#{@key}) file not found: #{name}" if !file.exists?
 			if to
 				file >> to_file
 				to_file
@@ -258,11 +273,13 @@ class Storage::LocalFS < Storage
 		super
 	end
 end
+																																							#~ LocalFS/
 
 
 
 #! should be is separate file
 class Storage::GoogleDrive < Storage
+																																							#~ GoogleDrive\
 	C_warn_dir_name = '! ! ! do not change the content here manually ! ! !'
 	# credentials for PROD — https://console.cloud.google.com/apis/credentials?project=fardrive-318206
 	# can be already defined in tests
@@ -302,7 +319,7 @@ class Storage::GoogleDrive < Storage
 					credentials.refresh_token = token
 				else
 					# get auth code in browser
-					C_input_mutex.synchronize do
+					C_input_mutex.sync do
 						auth_url = credentials.authorization_uri
 						IO.popen('clip', 'w') {|_| _.write auth_url.to_s }
 						puts "\n1) Open this page in your browser for [[ #{@account} ]] account (URL ALREADY COPIED to clipboard):\n  #{auth_url}"
@@ -349,7 +366,12 @@ class Storage::GoogleDrive < Storage
 				target_dir.upload_from_file(file.abs_path, nil, convert:false)
 			end
 		# *too many different errors: HTTPClient::KeepAliveDisconnected, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ENETUNREACH, Google::Apis::TransmissionError, SocketError
-		rescue
+		rescue e
+			# (<!)
+			if e.is_a?(Google::Apis::ClientError) && e.message.includes?('storageQuotaExceeded')
+				raise NoFreeSpace
+			end
+
 			attempt ||= 0
 			attempt += 1
 			# retry for 1 hour
@@ -362,11 +384,11 @@ class Storage::GoogleDrive < Storage
 			raise
 		end
 	end
-
+																																							#~ GoogleDrive
 	def get(name, to:nil)
 		super do |to_file|
 			file = target_dir.file_by_title name
-			raise KnownError, "(GoogleDrive - #{@account}) file not found: #{name}" if !file
+			raise FileNotFound, "(#{@key}) file not found: #{name}" if !file
 			# *attempt with acknowledge_abuse needed to allows downloading of files infected with a virus
 			#  otherwise service will return Invalid request (Google::Apis::ClientError) with Forbidden in details
 			#  https://github.com/gimite/google-drive-ruby/issues/413
@@ -401,7 +423,7 @@ class Storage::GoogleDrive < Storage
 						res = dir.create_subcollection C_warn_dir_name
 					end
 				else
-					raise KnownError, "(GoogleDrive - #{@account}) dir '#{@dir_name}' is missed"
+					raise KnownError, "(#{@key}) dir '#{@dir_name}' is missed"
 				end
 			end
 
@@ -414,7 +436,7 @@ class Storage::GoogleDrive < Storage
 			storage_dir.subcollection_by_title(@set) || storage_dir.create_subcollection(@set)
 		end
 	end
-
+																																							#~ GoogleDrive
 	# do not create, just check
 	def set_dir_exists?
 		storage_dir.subcollection_by_title(@set)
@@ -456,6 +478,7 @@ class Storage::GoogleDrive < Storage
 		end
 	end
 end
+																																							#~ GoogleDrive/
 
 
 
