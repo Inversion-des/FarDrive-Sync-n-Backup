@@ -186,10 +186,10 @@ class App
 								dir_path: 'F:/FarDrive_storage',
 								quota_MB: 700
 							},
-							LocalFS_2(
+							LocalFS_2: {
 								dir_path: 'G:/FarDrive_storage',
 								quota_GB: 20
-							)
+							}
 						},
 						array_2: {
 							_config: {

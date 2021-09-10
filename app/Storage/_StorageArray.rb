@@ -98,6 +98,7 @@ class StorageArray
 			# upload attempts
 			begin
 				if storage=possible_storages.shift
+																																										w("  (array) add_update to: #{storage.key}")
 					storage.add_update file
 					# *update works thanks to hash default proc
 					files_map[fn].update(
@@ -178,13 +179,15 @@ class StorageArray
 	end
 
 	# if over_used_space — move some files to other storages
-	def balance_if_needed
+	def balance_if_needed(tmp_dir:nil, fast_one:nil)
 		storages.each do |storage|
 			while storage.used_space > storage.quota
 				over_used_space = storage.used_space - storage.quota
-																																										w(%Q{over_used_space=}+over_used_space.inspect)
+																																										w(%Q{over_used_space.hr=}+over_used_space.hr.inspect)
+																																										w(%Q{  storage.key=}+  storage.key.inspect)
 				# find the best file_to_move
 				file_name_to_move = nil
+				moved_file_size = nil
 				min_size_diff = storage.used_space + 1
 				files_map.each do |some_file_name, some_file|
 					next if some_file.storage != storage.key # we need only files on this storage
@@ -192,11 +195,20 @@ class StorageArray
 					if size_diff < min_size_diff
 						min_size_diff = size_diff
 						file_name_to_move = some_file_name
+						moved_file_size = some_file.size
 					end
 				end
-				file_to_move = get file_name_to_move
-				# it should find the best next storage and delete from the current one
+				 																																						w(%Q{  file_name_to_move=}+  file_name_to_move.inspect)
+																																										w(%Q{  moved_file_size.hr=}+  moved_file_size.hr.inspect)
+				# *fast_one used here to do not download file from cloud if it is awailable on LocalFS
+				# *we do not use tmp files if reading from LocalFS
+				tmp_dir = nil if fast_one.is_a?(Storage::LocalFS)
+				file_to_move = fast_one.get file_name_to_move, to:tmp_dir
+				# *it should find the best next storage and delete from the current one
 				add_update file_to_move
+
+				# delete tmp file
+				file_to_move.del! if tmp_dir
 			end
 		end
 	end
@@ -263,7 +275,7 @@ class StorageArray
 		def update_stats
 			@db.used = @array.files_map.values.sum{|_| _.storage == @key ? _.size : 0 }
 			@db.used_MB = (@db.used.to_f / 1.MB).ceil
-			@db.used_perc = (@db.used.to_f / quota).round(2) if quota < Float::INFINITY
+			@db.used_perc = (@db.used.to_f / quota * 100).round(1) if quota < Float::INFINITY
 		end
 	end
 

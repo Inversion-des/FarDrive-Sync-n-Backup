@@ -2419,7 +2419,7 @@ class StorageHelper
 
 	def balance_if_needed
 		storages.values.each do |_|
-			_.balance_if_needed if _.is_a? StorageArray
+			_.balance_if_needed(tmp_dir:@sync.tmp_dir, fast_one:fast_one) if _.is_a? StorageArray
 		end
 	end
 

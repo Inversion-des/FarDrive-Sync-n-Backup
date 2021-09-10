@@ -366,7 +366,7 @@ class Storage::GoogleDrive < Storage
 				target_dir.upload_from_file(file.abs_path, nil, convert:false)
 			end
 		# *too many different errors: HTTPClient::KeepAliveDisconnected, Errno::ECONNRESET, Errno::ECONNREFUSED, Errno::ENETUNREACH, Google::Apis::TransmissionError, SocketError
-		rescue e
+		rescue StandardError => e
 			# (<!)
 			if e.is_a?(Google::Apis::ClientError) && e.message.includes?('storageQuotaExceeded')
 				raise NoFreeSpace
