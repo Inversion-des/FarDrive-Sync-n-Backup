@@ -43,7 +43,7 @@ class App
 			# CMD: run -up
 			when '-up'
 				sync.up do
-					sync.h_storage.set @storages
+					sync.h_storage.use @storages
 				end
 
 			# sync DOWN (restore)

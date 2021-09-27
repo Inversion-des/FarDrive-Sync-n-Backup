@@ -300,13 +300,30 @@ class IPath
 		res = system cmd
 	end
 
+	C_attributes = %w[readonly hidden system compressed]
 	def attrs(all:false)
 		arr = File.attributes pn
-		all ? arr : arr & %w[readonly hidden system compressed]
+		all ? arr : arr & C_attributes
 	rescue Errno::ENOENT
 		raise "(attrs) ENOENT: #{path}"
 	end
 																																							#~ IPath
+	C_attributes.each do |m|
+		# readonly?, hidden?
+		get_m = m+'?'
+		define_method get_m do
+			File.send get_m, pn
+		end
+
+		# readonly = yes
+		set_m = m+'='
+		define_method set_m do |v|
+			file = File.new pn
+			file.send set_m, v
+			file.close
+		end
+	end
+
 	# file.attrs = []
 	# file.attrs = ['readonly']
 	def attrs=(arr)
@@ -314,6 +331,7 @@ class IPath
 		add = arr - cur_arr
 		rem = cur_arr - arr
 		file = nil
+		prefix = '(attrs=) '
 		# *we should do 'remove' before 'add' and the first one for remove should be 'system'
 		#  otherwise you can get an error — "Not resetting system file"
 		if rem.delete 'system'
@@ -322,15 +340,17 @@ class IPath
 		rem.each do |attr|
 			if dir?
 				cmd = case attr
+					when 'readonly'
+						%Q[attrib -R "#{abs_path}"]
 					when 'hidden'
-						%Q[attrib -H "#{path}"]
+						%Q[attrib -H "#{abs_path}"]
 					when 'system'
-						%Q[attrib -S "#{path}"]
+						%Q[attrib -S "#{abs_path}"]
 					when 'compressed'
-						%Q[compact /U "#{path}" >nul]
+						%Q[compact /U "#{abs_path}" >nul]
 				end
 				if cmd
-					system cmd, exception:true
+					do_cmd cmd, prefix:prefix
 				end
 			# file
 			else
@@ -341,15 +361,17 @@ class IPath
 		add.each do |attr|
 			if dir?
 				cmd = case attr
+					when 'readonly'
+						%Q[attrib +R "#{abs_path}"]
 					when 'hidden'
-						%Q[attrib +H "#{path}"]
+						%Q[attrib +H "#{abs_path}"]
 					when 'system'
-						%Q[attrib +S "#{path}"]
+						%Q[attrib +S "#{abs_path}"]
 					when 'compressed'
-						%Q[compact /C "#{path}" >nul]
+						%Q[compact /C "#{abs_path}" >nul]
 				end
 				if cmd
-					system cmd, exception:true
+					do_cmd cmd, prefix:prefix
 				end
 			# file
 			else
@@ -376,6 +398,21 @@ class IPath
 			retry
 		end
 		raise
+	end
+
+	# *used for commans which exit with status 0 and return error in stdout
+	private\
+	def do_cmd(cmd, prefix:nil)
+		err = `#{cmd}`
+		if err != ''
+			# fix problem that 'attrib' output is in CP866 with cyrillic 'і' replaced with '?'
+			if cmd.start_with? 'attrib '
+				err = err
+					.encode('UTF-8', 'CP866')
+					.gsub(/\?/, 'і')   # fix missed cyrillic 'і'
+			end
+			raise KnownError, "#{prefix}failed: #{err}"
+		end
 	end
 
 	def inspect

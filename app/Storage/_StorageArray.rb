@@ -179,7 +179,7 @@ class StorageArray
 	end
 
 	# if over_used_space — move some files to other storages
-	def balance_if_needed(tmp_dir:nil, fast_one:nil)
+	def balance_if_needed(tmp_dir:nil, h_storage:nil)
 		storages.each do |storage|
 			while storage.used_space > storage.quota
 				over_used_space = storage.used_space - storage.quota
@@ -189,21 +189,22 @@ class StorageArray
 				file_name_to_move = nil
 				moved_file_size = nil
 				min_size_diff = storage.used_space + 1
-				files_map.each do |some_file_name, some_file|
-					next if some_file.storage != storage.key # we need only files on this storage
-					size_diff = (some_file.size - over_used_space).abs
+				files_map.each do |some_file_name, some_file_d|
+					next if some_file_d.storage != storage.key # we need only files on this storage
+					size_diff = (some_file_d.size - over_used_space).abs
 					if size_diff < min_size_diff
 						min_size_diff = size_diff
 						file_name_to_move = some_file_name
-						moved_file_size = some_file.size
+						moved_file_size = some_file_d.size
 					end
 				end
 				 																																						w(%Q{  file_name_to_move=}+  file_name_to_move.inspect)
 																																										w(%Q{  moved_file_size.hr=}+  moved_file_size.hr.inspect)
-				# *fast_one used here to do not download file from cloud if it is awailable on LocalFS
+				# *fast_one used here to do not download file from cloud if it is available on LocalFS
 				# *we do not use tmp files if reading from LocalFS
-				tmp_dir = nil if fast_one.is_a?(Storage::LocalFS)
-				file_to_move = fast_one.get file_name_to_move, to:tmp_dir
+				from = h_storage.and.fast_one || storagesH[ files_map[file_name_to_move]&.storage ]
+				tmp_dir = nil if from.is_a?(Storage::LocalFS)
+				file_to_move = from.get file_name_to_move, to:tmp_dir
 				# *it should find the best next storage and delete from the current one
 				add_update file_to_move
 

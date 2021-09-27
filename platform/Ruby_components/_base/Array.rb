@@ -5,6 +5,17 @@ class Array
 	alias :divide_by partition
 	alias :n size
 
+	# -includes any
+	# record.keys.includes_any? system_params
+	def includes_any?(arr)
+		(self & arr).any?
+	end
+
+	# -except
+	def except(val)
+		self - [val]
+	end
+
 	# -median
 	# returns integer or float
 	def median

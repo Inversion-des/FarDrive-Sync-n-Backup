@@ -170,6 +170,7 @@ class Sync
 		Sync.h_storage.for_each {|_| _.add_update_many files }
 	end
 	def Sync.db_down
+		Sync.h_storage.prepare   # *this can raise NoDefinedStoragesError
 		h_storage.fast_one.tap do |storage|
 			names = storage.files.map &:name
 			storage.get_many(names, to_dir:db_dir)
@@ -555,6 +556,7 @@ class Sync
 		@local_dirs.each do |local_dir_key, local_dir|
 			db = DirDB.new local_dir_key, dir:@db.dir, bin: ['tree_data']
 			tree_data = db.tree_data
+																																										#-#!_ trace^tree_data
 			up_db = @local_dirs_up_db_by_key[local_dir_key]
 			nodes_processed_by_path = {}
 			files_to_download_queue = []
@@ -564,6 +566,7 @@ class Sync
 			files_to_delete = []
 																																							#~ down
 			tasks = []
+			reuse_tasks = []
 			for dir_path, dir_up_d in up_db.tree_data
 				#. skip old deleted dirs or if dir doesn't exist
 				next if dir_up_d[:deleted] && !@f_force_update && (!tree_data[dir_path] || tree_data[dir_path][:deleted])
@@ -572,6 +575,7 @@ class Sync
 			end
 
 			do_in_parallel(tasks:tasks) do |dir, dir_path, dir_up_d|
+																																										#-#!_ trace^dir_up_d
 				# *08.08.21: now we do not save .excluded dirs in db
 #				if dir_up_d.excluded
 #					nodes_processed_by_path[dir_path] = 1   # prevents deletion of this folder
@@ -745,8 +749,10 @@ class Sync
 								end
 
 								if same_file
-									same_file.copy_to file.abs_path
-									update_file file, file_up_d
+									# reuse local instance - step 1/2 — copy file content
+									# *2 steps needed to fix problems when file is reused and in parallel it is updated by reusing some other file
+									#  ! in case of many big files — memory usage can spike here
+									reuse_tasks << [file, same_file.binread, file_up_d]
 									# *do not download
 									next   # file
 								end
@@ -762,6 +768,16 @@ class Sync
 						end
 					end
 				end
+			end
+
+			# reuse local instance - step 2/2 — update files
+			reuse_tasks.each do |file, body, file_up_d|
+				if file.exists?
+					# *readonly file cannot be changed
+					file.attrs = [] if file.attrs.includes_any?(%w[readonly hidden system])
+				end
+				file.binwrite body
+				update_file file, file_up_d
 			end
 
 			# *we should delete dirs and files after all other operations (in some cases file can be used)  (3/3)
@@ -852,7 +868,9 @@ class Sync
 					task_title = "#{pack_index})"
 																																										w("get: #{task_title} #{fname} ...")
 					# download
-					up_pack_file = h_storage.fast_one.get fname, to:@tmp_dir
+					# *we do not use tmp files if reading from LocalFS
+					tmp_dir = h_storage.fast_one.is_a?(Storage::LocalFS) ? nil : @tmp_dir
+					up_pack_file = h_storage.fast_one.get fname, to:tmp_dir
 																																										w("... got #{task_title} #{up_pack_file.size.hr}")
 					d_arr_by_file_key = arr.group_by &:file_key
 					fnames = d_arr_by_file_key.keys
@@ -865,7 +883,8 @@ class Sync
 						end
 					end
 					 																																					w("... done #{task_title} #{fnames.n} files")
-					up_pack_file.del!
+					# *delete only if we downloaded a file (do not delete original in case of LocalFS)
+					up_pack_file.del! if tmp_dir
 					 																																					# time_end^    in #{'%.3f' % ttime}
 					 																																					ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 					 																																					w("    in #{'%.3f' % ttime}")
@@ -2360,7 +2379,13 @@ class StorageHelper
 		storages.each do |key, storage|
 																																										w("[prepare #{key}]")
 			# *will cause auth if token missed
+			# *fails if storage_dir not available
 			storage.storage_dir
+		rescue KnownError
+			puts "(StorageHelper) prepare for #{key} failed: #$!"
+			puts "! ! ! (StorageHelper) #{key} rejected"
+			# remove bad storage from array
+			storages.delete key
 		end
 	end
 
@@ -2419,7 +2444,7 @@ class StorageHelper
 
 	def balance_if_needed
 		storages.values.each do |_|
-			_.balance_if_needed(tmp_dir:@sync.tmp_dir, fast_one:fast_one) if _.is_a? StorageArray
+			_.balance_if_needed(tmp_dir:@sync.tmp_dir, h_storage:self) if _.is_a? StorageArray
 		end
 	end
 

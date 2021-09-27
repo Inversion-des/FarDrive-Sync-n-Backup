@@ -257,6 +257,8 @@ class Storage::LocalFS < Storage
 
 	def storage_dir
 		@storage_dir ||= IDir.new(@dir_path).create
+	rescue Errno::ENOENT
+		raise KnownError, "(#{@key}) storage_dir access failed: #$!"
 	end
 
 	def set_dir
