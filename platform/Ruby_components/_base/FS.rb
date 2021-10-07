@@ -483,7 +483,7 @@ class IDir < IPath
 			end
 		end
 	rescue Errno::ENOTEMPTY
-		puts "Cannot delete dir, probably some files are locked: #{abs_path}"
+		puts "Cannot delete dir, probably some files are locked: #{abs_path} -- skipped"
 	end
 
 	def clear!

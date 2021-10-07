@@ -235,11 +235,14 @@ class App
 	end
 	def init
 		DirDB.prod!
-		# $>.sync = true  # *realtime log (slower processing)
-		Thread.new do
-			loop do
-				$>.flush
-				sleep 3
+		if :realtime_log
+			$>.sync = true  # *may be slower processing
+		else
+			Thread.new do
+				loop do
+					$>.flush
+					sleep 3
+				end
 			end
 		end
 		puts

@@ -197,7 +197,13 @@ class Ruby7Zip < ZipEngine
 			]
 			# *tried to extract entry one-by-one and it was extremly slow: file_body = zip.extract_data entry
 			list = fnames
-				.map {|_| entry_by_fname[_] }
+				.map do |name|
+					# *sometimes there are errors (no such file in the pack)
+					entry_by_fname[name].tap do |_|
+						puts "(unpack_files) error: '#{name}' file missed in the pack" if !_
+					end
+				end
+				.reject(&:nil?)
 				.sort_by(&:index)  	# *if not sorted by index — some file_body is nil
 			zip.extract_data(list).each_with_index do |file_body, i|
 				fname = list[i].path

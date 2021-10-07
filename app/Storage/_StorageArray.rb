@@ -41,7 +41,7 @@ class StorageArray
 	end
 
 	def get(name, to:nil)
-		if storage=storagesH[ files_map[name]&.storage ]
+		if storage=storage_by(name)
 			storage.get(name, to:to)
 		else
 			if name.in? C_special_files
@@ -50,7 +50,7 @@ class StorageArray
 				threads = []
 				storages.map do |storage|
 					threads << Thread.new do
-						file = storage.get(name, to:to)
+						file ||= storage.get(name, to:to)
 						threads.each &:kill
 					rescue Storage::FileNotFound
 						:ignore
@@ -81,7 +81,7 @@ class StorageArray
 			fn = file.name
 			# select storages
 			possible_storages = []
-			if storage=storagesH[ files_map[fn]&.storage ]   # if file update
+			if storage=storage_by(fn)   # if file update
 				free_space = storage.free_space + files_map[fn].size
 				if free_space > file.size
 					possible_storages << storage
@@ -124,6 +124,10 @@ class StorageArray
 		end
 	end
 																																							#_ StorageArray
+	def storage_by(fname)
+		storagesH[ files_map[fname]&.storage ]
+	end
+
 	def files_map
 		@mutex.sync_if_needed do
 			# "1_2021.08.08"=>{storage:'GoogleDrive_1', size:777}
@@ -201,15 +205,15 @@ class StorageArray
 				 																																						w(%Q{  file_name_to_move=}+  file_name_to_move.inspect)
 																																										w(%Q{  moved_file_size.hr=}+  moved_file_size.hr.inspect)
 				# *fast_one used here to do not download file from cloud if it is available on LocalFS
-				# *we do not use tmp files if reading from LocalFS
-				from = h_storage.and.fast_one || storagesH[ files_map[file_name_to_move]&.storage ]
-				tmp_dir = nil if from.is_a?(Storage::LocalFS)
-				file_to_move = from.get file_name_to_move, to:tmp_dir
+				from = h_storage.and.fast_one || storage_by(file_name_to_move)
+				# *we do not use tmp file if reading from LocalFS
+				to = from.is_a?(Storage::LocalFS) ? nil : tmp_dir
+				file_to_move = from.get file_name_to_move, to:to
 				# *it should find the best next storage and delete from the current one
 				add_update file_to_move
 
 				# delete tmp file
-				file_to_move.del! if tmp_dir
+				file_to_move.del! if to
 			end
 		end
 	end
@@ -230,7 +234,7 @@ class StorageArray
 	end
 
 	def del(name)
-		if storage=storagesH[ files_map[name]&.storage ]
+		if storage=storage_by(name)
 			storage.del name
 			files_map.delete name
 		end

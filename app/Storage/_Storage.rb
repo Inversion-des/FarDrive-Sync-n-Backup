@@ -340,6 +340,15 @@ class Storage::GoogleDrive < Storage
 					@db_global.refresh_token = nil
 					retry
 				else
+					# retry for 1 hour^session
+					attempt ||= 0
+					attempt += 1
+					if attempt <= 360
+						sleep 10
+						# *log error type
+						print "[session retry - #{$!.inspect}]"
+						retry
+					end
 					raise
 				end
 			end
@@ -374,9 +383,9 @@ class Storage::GoogleDrive < Storage
 				raise NoFreeSpace
 			end
 
+			# retry for 1 hour^add_update
 			attempt ||= 0
 			attempt += 1
-			# retry for 1 hour
 			if attempt <= 360
 				sleep 10
 				# *log error type
@@ -388,25 +397,58 @@ class Storage::GoogleDrive < Storage
 	end
 																																							#~ GoogleDrive
 	def get(name, to:nil)
+		acknowledge_abuse = false
+
+		# *to.is.empty? — cannot be used, because it returns true for empty dir
+		raise KnownError, "(#{@key} - get) error: 'to' param is missed" if to.nil? || to == ''
+
 		super do |to_file|
 			file = target_dir.file_by_title name
 			raise FileNotFound, "(#{@key}) file not found: #{name}" if !file
 			# *attempt with acknowledge_abuse needed to allows downloading of files infected with a virus
 			#  otherwise service will return Invalid request (Google::Apis::ClientError) with Forbidden in details
 			#  https://github.com/gimite/google-drive-ruby/issues/413
-			begin
-				file.download_to_file to_file.to_s
-			rescue Google::Apis::ClientError
-				print "[get retry for '#{name}' - #{$!}]"
-				file.download_to_file to_file.to_s, acknowledge_abuse:true
-			end
+			file.download_to_file to_file.to_s, acknowledge_abuse:acknowledge_abuse
 			to_file
+		# *too many different errors: Errno::ECONNRESET
+		rescue StandardError => e
+			case e
+				when KnownError
+					raise
+				when Google::Apis::ClientError
+					print "[get retry for '#{name}' - #{$!}]"
+					acknowledge_abuse = true
+					retry
+				else
+					# retry for 1 hour^get
+					attempt ||= 0
+					attempt += 1
+					if attempt <= 360
+						sleep 10
+						# *log error type
+						print "[get retry - #{$!.inspect}]"
+						retry
+					end
+					raise
+			end
 		end
 	end
 
 	def del(name)
 		file = target_dir.file_by_title name
 		file.and.delete 'permanent'
+	# *too many different errors:
+	rescue StandardError => e
+		# retry for 1 hour^del
+		attempt ||= 0
+		attempt += 1
+		if attempt <= 360
+			sleep 10
+			# *log error type
+			print "[del retry - #{$!.inspect}]"
+			retry
+		end
+		raise
 	end
 
 	def storage_dir

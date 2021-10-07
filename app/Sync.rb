@@ -147,7 +147,7 @@ class Sync
 		@db_dir = nil
 	end
 	def Sync.h_storage
-		@h_storage ||= StorageHelper.new(sync:self, in_storage_dir:true)
+		@h_storage ||= StorageHelper.new(sync:self, in_storage_dir:true, context:'Sync')
 	end
 	def Sync.flush_h_storage
 		@h_storage = nil
@@ -322,7 +322,7 @@ class Sync
 	def h_storage
 		@h_storage ||= begin
 			init
-			StorageHelper.new(sync:self)
+			StorageHelper.new(sync:self, context:'sync')
 		end
 	end
 
@@ -535,6 +535,7 @@ class Sync
 			ZipCls.new(zip:zip).unpack_all to:up_db_dir
 			@up_db = DirDB.new up_db_dir.abs_path, bin: ['data_by_file_key']
 			# update storage db if needed
+			#! ideally we should detect here if storages are really changed
 			if @up_db.storages.not.empty?
 				h_storage.use @up_db.storages
 				h_storage.prepare
@@ -845,7 +846,7 @@ class Sync
 						print ','
 						retry
 					else
-						pputs "(on_ready) failed: #{$!}"
+						pputs "(on_ready) failed: #$!"
 						puts $@[0]
 					end
 				end
@@ -866,11 +867,14 @@ class Sync
 					pack_index += 1
 					fname = pack_name+'.7z'
 					task_title = "#{pack_index})"
-																																										w("get: #{task_title} #{fname} ...")
+
+					storage = h_storage.fast_one
+					arr_storage_part = storage.is_a?(StorageArray) ? " [#{storage.storage_by(fname).key}]" : ''
+																																										w("get: #{task_title} #{fname}#{arr_storage_part} ...")
 					# download
 					# *we do not use tmp files if reading from LocalFS
-					tmp_dir = h_storage.fast_one.is_a?(Storage::LocalFS) ? nil : @tmp_dir
-					up_pack_file = h_storage.fast_one.get fname, to:tmp_dir
+					tmp_dir = storage.is_a?(Storage::LocalFS) ? nil : @tmp_dir
+					up_pack_file = storage.get fname, to:tmp_dir
 																																										w("... got #{task_title} #{up_pack_file.size.hr}")
 					d_arr_by_file_key = arr.group_by &:file_key
 					fnames = d_arr_by_file_key.keys
@@ -975,7 +979,7 @@ class Sync
 	end
 
 	def make_packs!
-																																										w("-- make_packs! --")
+																																										w("-- make_packs! -- (#{Time.now.strftime('%d.%m - %H:%M')})")
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 		@tmp_dir.create
@@ -1102,25 +1106,31 @@ class Sync
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(make_packs!) processed in #{'%.3f' % ttime}")
 		end
-		# update db when all the packs done
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+		# update db (tree_data.dat for each dir) when all the packs done
 		@trees.values.each &:save
 																																										# time_end2^@trees.each &:save
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
+		# data_by_file_key.dat
 		Chunks.save
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		# *should be before packing #set_db.7z
-		h_storage.balance_if_needed
-		h_storage.save_db
-
 		@db.base.tap do |_|
 			_.last_up_at = at
 			_.last_pack_id = pack_id
 			_.save
 		end
+
+		# *should be after base.save and before packing #set_db.7z
+		begin
+			h_storage.balance_if_needed
+			h_storage.save_db   # storages.dat
+		rescue
+			puts "! ! ! balance_if_needed failed: #$!"
+		end
+
 		# add base.dat separately (needed for detecting full fast_one storage for down)
 		base_uploading_thread = Thread.new do
 			base_file = IFile.new @db.dir/'base.dat'
@@ -1881,6 +1891,7 @@ class Chunk
 			@@chunk_by_key.delete key
 		end
 		
+		# data_by_file_key.dat
 		def save
 			#. *sorting needed for tests to compare results (after adding processing in threads)
 			@@db.replace @@db.sort.to_h if DirDB.dev?
@@ -2288,9 +2299,10 @@ end
 
 class StorageHelper
 	# *@sync — can be Sync class or Sync instance
-	def initialize(sync:nil, in_storage_dir:nil)
+	def initialize(sync:nil, in_storage_dir:nil, context:nil)
 		@sync = sync
 		@in_storage_dir = in_storage_dir
+		@context = context
 		@db = @sync.db.storages
 	end
 
@@ -2320,11 +2332,11 @@ class StorageHelper
 					? (StorageArray.new(key:key, set:@sync.set, db:o))
 					: (Storage[key].new **o.merge(key:key, set:@sync.set, in_storage_dir:@in_storage_dir))
 			end
-			raise NoDefinedStoragesError, '(storages) there are no defined storages' if map.empty?
-																																										w("using storages: #{map.keys} (#{map.length}/#{@db.length})")
+			raise NoDefinedStoragesError, '(=@context - storages) there are no defined storages' if map.empty?
+																																										w("(#{@context}) using storages: #{map.keys} (#{map.length}/#{@db.length})")
 			rejected_storages = @db.keys - map.keys
 			if rejected_storages[0]
-																																										w("rejected storages: #{rejected_storages}")
+																																										w("(#{@context}) rejected storages: #{rejected_storages}")
 				:list
 			end
 
@@ -2377,13 +2389,13 @@ class StorageHelper
 	#   otherwise .fast_one will fail with a timeout error
 	def prepare
 		storages.each do |key, storage|
-																																										w("[prepare #{key}]")
+																																										w("(#{@context}) [prepare #{key}]")
 			# *will cause auth if token missed
-			# *fails if storage_dir not available
+			# *fails if storage_dir is not available
 			storage.storage_dir
 		rescue KnownError
-			puts "(StorageHelper) prepare for #{key} failed: #$!"
-			puts "! ! ! (StorageHelper) #{key} rejected"
+			puts "(#{@context} - StorageHelper) prepare for #{key} failed: #$!"
+			puts "! ! ! (#{@context} - StorageHelper) #{key} rejected"
 			# remove bad storage from array
 			storages.delete key
 		end
@@ -2394,7 +2406,7 @@ class StorageHelper
 		storages.map do |key, storage|
 			Thread.new do
 				yield storage, key
-																																										w("[> #{key} done]")
+																																										w("(#{@context}) [> #{key} done]")
 			end
 		end.each &:join
 	end
@@ -2407,23 +2419,32 @@ class StorageHelper
 			tmp_dir = (@sync.start_dir/:z_tmp_fast_one).create
 			n = 0
 			require 'timeout'
-			Timeout.timeout 10 do
-				for_each do |some_storage, key|
-					# download base.dat as tmp file
-					file = tmp_dir/"test_#{key}.tmp"
-					some_storage.get 'base.dat', to:file
-					some_storage.base_data = eval(file.read) rescue {}
-					some_storage.base_data.n = n += 1
-					file.del!
+			begin
 
-				rescue Errno::ENOENT, KnownError
-																																										w("(#{key}) error: #{$!.inspect}")
-					# *do not use storage if base.dat is missed there
-					:skip
+				Timeout.timeout 10 do
+					for_each do |some_storage, key|
+						# download base.dat as tmp file
+						file = tmp_dir/"test_#{key}.tmp"
+						some_storage.get 'base.dat', to:file
+						some_storage.base_data = eval(file.read) rescue {}
+						some_storage.base_data.n = n += 1
+						file.del!
+
+					rescue Errno::ENOENT, KnownError
+																																											w("(#{@context} - fast_one) #{key} error: #{$!.inspect}")
+						# *do not use storage if base.dat is missed there
+						# remove bad storage from array
+						puts "! ! ! (#{@context} - StorageHelper) #{key} rejected"
+						storages.delete key
+						:skip
+					end
 				end
 
-				raise KnownError, '(fast_one) error: all storages skipped (base.dat missed)' if n == 0
+			rescue Timeout::Error
+				puts "! ! ! (#{@context} - fast_one) Timeout error, n: #{n}"
 			end
+
+			raise KnownError, '(=@context - fast_one) error: all storages skipped (base.dat missed)' if n == 0
 			# get the fastest of storages with the latest data
 			# *we do not compare .last_pack_id because only folders could be created/deleted and new pack is not created in such case
 			#   also for global db there is no last_pack_id
@@ -2432,10 +2453,10 @@ class StorageHelper
 				.first
 					.tap do |_|
 						:log
-																																										w("fast_one storage: #{_.key}")
-																																										# time_end2^fast_one
+																																										w("(#{@context}) fast_one storage: #{_.key}")
+																																										# time_end2^=@context - fast_one
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(fast_one) processed in #{'%.3f' % ttime}")
+																																										w("(#{@context} - fast_one) processed in #{'%.3f' % ttime}")
 					end
 		ensure
 			tmp_dir&.del!
@@ -2448,6 +2469,7 @@ class StorageHelper
 		end
 	end
 
+	# storages.dat
 	def save_db
 		# *simple storage is saved in .set
 		if storages.values.any? {|_| _.is_a? StorageArray }
