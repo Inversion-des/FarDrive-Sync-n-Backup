@@ -160,8 +160,12 @@ class StorageArray
 		if @strategy == 'one_by_one'
 			order = @db._config.order || raise(KnownError, "'order' param missed in the _config for #{@key}")
 			storages.sort_by {|_| order.index(_.key) || raise(KnownError, "#{_.key} not found in the 'order' list") }
-		else   # even (default, get less used first)
+		# useful if for some storage there is no quota (unlimited storage)
+		elsif @strategy == 'even_MB'
 			storages.sort_by {|_| [_.used_space, storages.index(_)] }
+		else   # even (default, get less used first)
+			# for debug add: print("[=.used_space_perc] ");
+			storages.sort_by {|_| [_.used_space_perc, storages.index(_)] }
 		end
 	end
 																																							#~ StorageArray
@@ -274,13 +278,16 @@ class StorageArray
 		def used_space
 			@db.used || (update_stats; @db.used)
 		end
+		def used_space_perc
+			@db.used_perc || (update_stats; @db.used_perc)
+		end
 		def free_space
 			quota - used_space
 		end
 		def update_stats
 			@db.used = @array.files_map.values.sum{|_| _.storage == @key ? _.size : 0 }
 			@db.used_MB = (@db.used.to_f / 1.MB).ceil
-			@db.used_perc = (@db.used.to_f / quota * 100).round(1) if quota < Float::INFINITY
+			@db.used_perc = quota == 0 ? 100 : (@db.used.to_f / quota * 100).round(1)
 		end
 	end
 

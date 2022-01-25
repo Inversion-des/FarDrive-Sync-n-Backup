@@ -245,8 +245,11 @@ class App
 				end
 			end
 		end
+		$stderr = $>   # single buffered output (instead of 2>&1)
 		puts
-		puts '=== ' + Time.now.to_s + ' ' + '='*45  # date marker
+		ver_file = 'build.txt'
+		ver = File.read(ver_file) rescue "[#{ver_file} missed]"
+		puts '=== ' + Time.now.to_s + " ( v#{ver} / #{RUBY_PLATFORM} ) " + '='*45  # date & ver marker
 
 		# run with 'below normal' CPU piority
 		require 'win32/process'

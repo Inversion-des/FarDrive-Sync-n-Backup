@@ -25,6 +25,7 @@ class Array
 		len % 2 == 1 ? sorted[len/2] : (sorted[len/2 - 1] + sorted[len/2]).to_f / 2
 	end
 
+	# -average
 	def avrg
 		return nil if empty?
 		sum.fdiv size

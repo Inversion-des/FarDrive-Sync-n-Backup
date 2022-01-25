@@ -1,7 +1,7 @@
 @echo off
 title Up
 echo Up...
-call run -up >> up.log  2>&1  ^
+call run -up >> up.log  ^
 	&& echo ----- done ----- ^
 	&& goto :end
 echo ----- [x] failed -----

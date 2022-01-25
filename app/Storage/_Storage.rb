@@ -115,10 +115,16 @@ class Storage
 		end
 	end
 
-	def add_update_many(files)
+	def add_update_many(files, part=nil)
+		done_n = 0
 		do_in_parallel(tasks:files) do |file|
 			add_update file
-			print '.'
+			if part
+				done_n += 1
+				part.close('.' * done_n)
+			else
+				print '.'
+			end
 		end
 	end
 
@@ -212,11 +218,17 @@ class Storage::LocalFS < Storage
 			file.copy_to target_dir
 		end
 	end
-	def add_update_many(files)
+	def add_update_many(files, part=nil)
+		done_n = 0
 		# *not in parallel
 		files.each do |_|
 			add_update _
-			print '.'
+			if part
+				done_n += 1
+				part.close('.' * done_n)
+			else
+				print '.'
+			end
 		end
 	end
 

@@ -11,7 +11,7 @@ PWD_MUTEX = Mutex.new
 # D:\statsoft\Ruby\3.0\lib\ruby\3.0.0\pathname.rb
 class Pathname
 	alias :path to_s
-	alias :ext extname
+	alias :ext extname		# .png
 
 	def name
 		@_basename ||= basename.to_s
@@ -411,7 +411,7 @@ class IPath
 					.encode('UTF-8', 'CP866')
 					.gsub(/\?/, 'і')   # fix missed cyrillic 'і'
 			end
-			raise KnownError, "#{prefix}failed: #{err}"
+			raise FS::KnownError, "#{prefix}failed: #{err}"
 		end
 	end
 
@@ -452,7 +452,7 @@ class IDir < IPath
 	end
 
 	# src_dir = dir/:src1  -/ -+
-	# *returns file in case like: IDir.new(dir_path)/fname (type detected in method_missing)
+	# *returns IFile in case like: IDir.new(dir_path)/fname (type detected in method_missing)
 	def +(up)
 		raise "(IDir - /) error: path cannot be empty" if up.nil? || up.to_s.empty?
 		# '/' in the beginning causes problem that path becomes from the root of the drive
@@ -524,6 +524,7 @@ class IDir < IPath
 			end
 	end
 
+	# -glob
 	# << array of strings
 	#	  reject_by_start: [@db.dir, @tmp_dir.name, 'w.txt'] | '.db'
 	def clear_glob(reject_by_start:nil)
@@ -586,7 +587,7 @@ class IDir < IPath
 		end
 		res
 	end
-
+																																							#~ IDir
 
 	# -copy dir
 	# tmp_dir << 'files/main/find_new_photo' — copy dir (tmp_dir should exist, otherwise it will work as below v)
@@ -715,6 +716,26 @@ class IFile < IPath
 		parent
 	end
 
+	# -open
+	# file.open 'w'
+	# file.open 'a'
+	# < IFile
+	def open(*args, &block)
+		@file = File.open abs_path, *args, &block
+		self
+	end
+
+	def method_missing(m, *args, &block)
+		case m
+			when :puts, :print, :flush, :close
+				@file || open('w')   # open file if needed
+				@file.send m, *args
+			else
+				# pass to IPath method_missing
+				super
+		end
+	end
+
 	# *faster then .dir.path
 	def dir_path
 		File.dirname path
@@ -795,6 +816,39 @@ class IFile < IPath
 		res
 	end
 
+	# -rename
+	# .rename 'new_clear_name'
+	# .rename('default2', ext:'jpg', add_suffix_if_needed:true)
+	def rename(new_name, ext:nil, add_suffix_if_needed:nil)
+		ext ||= self.ext
+		ext = '.'+ext if ext[0] != '.'
+		new_path = nil
+		_n = 1
+		suffix = ''
+		catch :for_redo do
+			new_path = dir/(new_name+suffix+ext)
+			if File.exists? new_path
+				if add_suffix_if_needed
+					# if such name already exists — add '_1', '_2', …
+					_n += 1
+					suffix = "_#{_n}"
+					redo
+				else
+					raise FS::KnownError, "(IFile - rename) error: '#{new_path}' already exists"
+				end
+			end
+		end
+		super new_path
+		@pn = Pathname.new new_path
+	end
+																																							#~ IFile
+	# .full_rename 'new_name.ext'
+	# .full_rename 'new_name.ext', add_suffix_if_needed:yes
+	def full_rename(new_name, add_suffix_if_needed:nil)
+		name, ext = new_name.split /(?=\.[^.]+$)/
+		rename name, **({ext:ext, add_suffix_if_needed:add_suffix_if_needed})
+	end
+
 	# *there is also .delete on IPath level (works with retries)
 	def del!
 		FileUtils.rm self.abs_path, force:true
@@ -825,6 +879,9 @@ module FS
 	Conf = {
 		touch: 'touch'
 	}
+
+	# Error^KnownError < StandardError
+	class KnownError < StandardError;end
 
 	#- for module
 	class << self

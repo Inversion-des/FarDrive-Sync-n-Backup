@@ -39,10 +39,11 @@ require '_base/Array'
 require '_base/Hash'
 require '_base/Hash_dot_notation'
 require '_base/FS'
-# use `DirDB_dot_DEV, AndNot, Hub´
+# use `DirDB_dot_DEV, AndNot, Hub, ParaLines´
 require 'DirDB_dot_DEV'
 require 'AndNot'
 require 'Hub'
+require 'ParaLines'
 require_relative 'ZipEngine'
 Thread.abort_on_exception = true
 
@@ -61,6 +62,8 @@ module Refinements
 	end
 end
 using Refinements
+
+C_plines = ParaLines.new
 
 module Helpers
 	WinPathLimit = 247
@@ -167,7 +170,12 @@ class Sync
 			file
 		end
 		# upload to the root dir instead of set_dir
-		Sync.h_storage.for_each {|_| _.add_update_many files }
+		pline = C_plines.add_shared_line '(Sync.db_up) > > > '
+		Sync.h_storage.for_each do |storage, key|
+			# *make output like: [LocalFS....] — each dot is an uploaded file
+			part = pline.part_open "[#{key}…"+(' ' * (files.n-1))+'] '
+			storage.add_update_many files, part
+		end
 	end
 	def Sync.db_down
 		Sync.h_storage.prepare   # *this can raise NoDefinedStoragesError
@@ -421,10 +429,7 @@ class Sync
 			@tree.stats.files_changed_size = @tree.stats.files_changed_size.hr
 			# *we cannot get size of deleted file and we do not store it in file.d
 			# @tree.stats.files_removed_size = @state.removed.files.sum(&:size).hr
-																																											# w^@tree.stats:
-																																											w("@tree.stats:")
-																																											# pp^@tree.stats
-																																											pp(@tree.stats)
+																																										#-#!!_ o^@tree.stats
 
 			make_packs!
 
@@ -869,13 +874,17 @@ class Sync
 					task_title = "#{pack_index})"
 
 					storage = h_storage.fast_one
-					arr_storage_part = storage.is_a?(StorageArray) ? " [#{storage.storage_by(fname).key}]" : ''
-																																										w("get: #{task_title} #{fname}#{arr_storage_part} ...")
+					arr_storage_part = storage.is_a?(StorageArray) ? (" %-14s" % "[#{storage.storage_by(fname).key}]") : ''
+																																										#-#!!_ w^get: =task_title =fname=arr_storage_part ...
+																																										pack_line = C_plines.add_shared_line " <<< %-32s#{arr_storage_part} ..." % ["#{task_title} #{fname}"]
+
 					# download
 					# *we do not use tmp files if reading from LocalFS
 					tmp_dir = storage.is_a?(Storage::LocalFS) ? nil : @tmp_dir
 					up_pack_file = storage.get fname, to:tmp_dir
-																																										w("... got #{task_title} #{up_pack_file.size.hr}")
+																																										#-#!!_ w^... got =task_title =up_pack_file.size.hr
+																																										# do^pack_line << "%10s ..." % [up_pack_file.size.hr]
+																																										pack_line << "%10s ..." % [up_pack_file.size.hr]
 					d_arr_by_file_key = arr.group_by &:file_key
 					fnames = d_arr_by_file_key.keys
 					StringIO.open(up_pack_file.binread) do |zip|
@@ -886,12 +895,15 @@ class Sync
 							end
 						end
 					end
-					 																																					w("... done #{task_title} #{fnames.n} files")
+					 																																					#-#!!_ w^... done =task_title =fnames.n files
+																																										# do^pack_line << "%4s files done" % [fnames.n]
+																																										pack_line << "%4s files done" % [fnames.n]
 					# *delete only if we downloaded a file (do not delete original in case of LocalFS)
 					up_pack_file.del! if tmp_dir
-					 																																					# time_end^    in #{'%.3f' % ttime}
+					 																																					# time_end
 					 																																					ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-					 																																					w("    in #{'%.3f' % ttime}")
+																																										# do^pack_line << " (in #{'%.3f' % ttime})"
+																																										pack_line << " (in #{'%.3f' % ttime})"
 				end
 			end
 			do_in_parallel(tasks:tasks)
@@ -948,6 +960,7 @@ class Sync
 		end
 
 	ensure
+		C_plines.flush
 		@tmp_dir.and.del!
 	end
 																																							#~ down/
@@ -960,10 +973,12 @@ class Sync
 																																										# time_end2^Tree.new
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(Tree.new) processed in #{'%.3f' % ttime}")
-																																											# w^tree.stats.reject{ ~hv==0 }:
-																																											w("tree.stats.reject{|k, v| v==0 }:")
-																																											# pp^tree.stats.reject{ ~hv==0 }
-																																											pp(tree.stats.reject{|k, v| v==0 })
+																																										# do^tidy_stats = tree.stats.reject{ ~hv==0 }
+																																										tidy_stats = tree.stats.reject{|k, v| v==0 }
+																																											# w^tidy_stats:
+																																											w("tidy_stats:")
+																																											# pp^tidy_stats
+																																											pp(tidy_stats)
 		 																																								#-#!_ o^db.tree_data
 		# resolve issues
 		loop do
@@ -1066,10 +1081,12 @@ class Sync
 						end
 						pack_fn = pack_name+'.7z'
 						pack_file = @tmp_dir/pack_fn
+						uploaing_line = C_plines.add_shared_line " > > >  #{pack_file.name}"
 						uploading_threads << Thread.new(zip, pack_name, pack_file) do |zip, pack_name, pack_file|
 							# archive
 							zip.save_as pack_file
-																																										w(" > > >  #{pack_file.name} (#{pack_file.size.hr})")
+							uploaing_line << " (#{pack_file.size.hr}): "
+																																										#-#!!_ w^ > > >  =pack_file.name (=pack_file.size.hr)
 							# update files chunks (should be after .save_as)
 							zip.files.each do |_|
 								_.chunk.update(
@@ -1078,7 +1095,7 @@ class Sync
 							end
 
 							# move archive to remote dir
-							h_storage.for_each {|_| _.add_update pack_file }
+							h_storage.for_each(uploaing_line) {|_| _.add_update pack_file }
 
 							pack_file.del!
 						end
@@ -1132,18 +1149,21 @@ class Sync
 		end
 
 		# add base.dat separately (needed for detecting full fast_one storage for down)
+		base_uploaing_line = C_plines.add_shared_line ' > > >  base.dat: '
 		base_uploading_thread = Thread.new do
 			base_file = IFile.new @db.dir/'base.dat'
-			h_storage.for_each {|_| _.add_update base_file }
+			h_storage.for_each(base_uploaing_line) {|_| _.add_update base_file }
 		end
 		# archive db
+		db_uploaing_line = C_plines.add_shared_line " > > >  #{@db_fn}: "
 		db_file = @tmp_dir/@db_fn
 		ZipCls.new(fp:db_file).pack_dir @db.dir
 		# … and move to destination
-		h_storage.for_each {|_| _.add_update db_file }
+		h_storage.for_each(db_uploaing_line) {|_| _.add_update db_file }
 		# *we should wait for this thread before tmp_dir deletion
 		base_uploading_thread.join
 
+		C_plines.flush
 		@tmp_dir.del!
 		 																																								# time_end2^update and backup db
 		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
@@ -1226,6 +1246,11 @@ class Sync
 			w '  You can read more about this solution here: https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=cmd#enable-long-paths-in-windows-10-version-1607-and-later'
 			w ''
 		end
+	end
+
+	# *for debugging
+	def w(text)
+		C_plines.add_static_line text
 	end
 
 	def inspect
@@ -2389,7 +2414,6 @@ class StorageHelper
 	#   otherwise .fast_one will fail with a timeout error
 	def prepare
 		storages.each do |key, storage|
-																																										w("(#{@context}) [prepare #{key}]")
 			# *will cause auth if token missed
 			# *fails if storage_dir is not available
 			storage.storage_dir
@@ -2401,12 +2425,13 @@ class StorageHelper
 		end
 	end
 
-	def for_each
+	def for_each(pline=nil)
 		# in parallel threads
 		storages.map do |key, storage|
+			part = pline.and.part_open "[#{key}… "
 			Thread.new do
 				yield storage, key
-																																										w("(#{@context}) [> #{key} done]")
+				part.and.close ']'
 			end
 		end.each &:join
 	end
@@ -2415,6 +2440,7 @@ class StorageHelper
 		@fast_one ||= begin
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+			pline = C_plines.add_shared_line "(#{@context}) fast_one storage: "
 			# *added to Shared.skip_root_nodes
 			tmp_dir = (@sync.start_dir/:z_tmp_fast_one).create
 			n = 0
@@ -2422,7 +2448,7 @@ class StorageHelper
 			begin
 
 				Timeout.timeout 10 do
-					for_each do |some_storage, key|
+					for_each(pline) do |some_storage, key|
 						# download base.dat as tmp file
 						file = tmp_dir/"test_#{key}.tmp"
 						some_storage.get 'base.dat', to:file
@@ -2452,11 +2478,13 @@ class StorageHelper
 				.sort_by {|_| [-_.base_data.last_up_at, _.base_data.n] }
 				.first
 					.tap do |_|
-						:log
-																																										w("(#{@context}) fast_one storage: #{_.key}")
-																																										# time_end2^=@context - fast_one
+																																										# do^pline << "--> =_.key"
+																																										pline << "--> #{_.key}"
+																																										# time_end
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(#{@context} - fast_one) processed in #{'%.3f' % ttime}")
+																																										# do^pline << " (in #{'%.3f' % ttime})"
+																																										pline << " (in #{'%.3f' % ttime})"
+						''
 					end
 		ensure
 			tmp_dir&.del!
