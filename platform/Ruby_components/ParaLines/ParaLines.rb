@@ -1,5 +1,7 @@
 
 class ParaLines
+	C_mutex = Mutex.new
+
 	def initialize
 		set_flags!
 		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''} }
@@ -57,10 +59,14 @@ class ParaLines
 
 			o.define_singleton_method :part_open do |text_|
 				d = line_by_key[key]
-				# *we replace placeholder chars like: … or _ or just the last char (order here needed for priority to be able to have _ in text and use … as a placeholder)
-				part_col = d[:col] + (text_.index('…') || text_.index('_') || text_.length-1)
+				part_col = nil
 
-				rel.send :output, key, text_
+				C_mutex.synchronize do
+					# *we replace placeholder chars like: … or _ or just the last char (order here needed for priority to be able to have _ in text and use … as a placeholder)
+					part_col = d[:col] + (text_.index('…') || text_.index('_') || text_.length-1)
+
+					rel.send :output, key, text_
+				end
 
 				# < helper obj with the .close method
 				Object.new.tap do |o|
