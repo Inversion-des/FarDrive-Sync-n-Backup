@@ -274,10 +274,5 @@ class App
 end
 
 
-# warn & trace as puts
-def w(t='warn')
-	puts t.to_s
-end
-
 App.new.cmd
 

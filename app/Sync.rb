@@ -1095,7 +1095,7 @@ class Sync
 						pack_fn = pack_name+'.7z'
 						pack_file = @tmp_dir/pack_fn
 						uploaing_line = C_plines.add_shared_line " > > >  #{pack_file.name}"
-						uploading_threads << Thread.new(zip, pack_name, pack_file) do |zip, pack_name, pack_file|
+						uploading_threads << Thread.new(zip, pack_name, pack_file, uploaing_line) do |zip, pack_name, pack_file, uploaing_line|
 							# archive
 							zip.save_as pack_file
 							uploaing_line << " (#{pack_file.size.hr}): "
