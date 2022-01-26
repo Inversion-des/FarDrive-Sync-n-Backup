@@ -63,7 +63,21 @@ module Refinements
 end
 using Refinements
 
+
+
 C_plines = ParaLines.new
+
+# *for debugging
+def w(text)
+	C_plines.add_static_line text
+end
+def pp(o)
+	o.pretty_inspect.each_line do |_|
+		C_plines.add_static_line _.chomp
+	end
+end
+
+
 
 module Helpers
 	WinPathLimit = 247
@@ -960,7 +974,6 @@ class Sync
 		end
 
 	ensure
-		C_plines.flush
 		@tmp_dir.and.del!
 	end
 																																							#~ down/
@@ -1095,7 +1108,7 @@ class Sync
 							end
 
 							# move archive to remote dir
-							h_storage.for_each(uploaing_line) {|_| _.add_update pack_file }
+							h_storage.for_each(uploaing_line) {|_| _.add_update pack_file, uploaing_line }
 
 							pack_file.del!
 						end
@@ -1152,18 +1165,17 @@ class Sync
 		base_uploaing_line = C_plines.add_shared_line ' > > >  base.dat: '
 		base_uploading_thread = Thread.new do
 			base_file = IFile.new @db.dir/'base.dat'
-			h_storage.for_each(base_uploaing_line) {|_| _.add_update base_file }
+			h_storage.for_each(base_uploaing_line) {|_| _.add_update base_file, base_uploaing_line }
 		end
 		# archive db
 		db_uploaing_line = C_plines.add_shared_line " > > >  #{@db_fn}: "
 		db_file = @tmp_dir/@db_fn
 		ZipCls.new(fp:db_file).pack_dir @db.dir
 		# … and move to destination
-		h_storage.for_each(db_uploaing_line) {|_| _.add_update db_file }
+		h_storage.for_each(db_uploaing_line) {|_| _.add_update db_file, db_uploaing_line }
 		# *we should wait for this thread before tmp_dir deletion
 		base_uploading_thread.join
 
-		C_plines.flush
 		@tmp_dir.del!
 		 																																								# time_end2^update and backup db
 		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
@@ -1246,11 +1258,6 @@ class Sync
 			w '  You can read more about this solution here: https://docs.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=cmd#enable-long-paths-in-windows-10-version-1607-and-later'
 			w ''
 		end
-	end
-
-	# *for debugging
-	def w(text)
-		C_plines.add_static_line text
 	end
 
 	def inspect

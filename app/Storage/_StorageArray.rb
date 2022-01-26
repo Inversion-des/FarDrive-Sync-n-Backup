@@ -75,7 +75,7 @@ class StorageArray
 		end
 	end
 																																							#~ StorageArray
-	def add_update(file)
+	def add_update(file, shared_line=nil)
 		# *do not allow to add in parallel, because storage selection is based on free space (so it should be updated after each upload)
 		@mutex.sync do
 			fn = file.name
@@ -98,8 +98,12 @@ class StorageArray
 			# upload attempts
 			begin
 				if storage=possible_storages.shift
-																																										w("  (array) add_update to: #{storage.key}")
+																																										# do^part = shared_line?.part_open "(=key - =storage.key =storage.used_space_perc%… "
+																																										part = shared_line.and.part_open "(#{key} - #{storage.key} #{storage.used_space_perc}%… "
+																																										#-#!!_ w^  (array - =key) add_update to: =storage.key
 					storage.add_update file
+																																										# do^part?.close ')'
+																																										part.and.close ')'
 					# *update works thanks to hash default proc
 					files_map[fn].update(
 						storage: storage.key.to_s,

@@ -109,7 +109,7 @@ class Storage
 	end
 
 	#-- api stubs
-	def add_update(file)
+	def add_update(file, shared_line=nil)
 		with_long_call_warns title:"add_update - #{file.name}" do
 			yield
 		end
@@ -213,7 +213,7 @@ class Storage::LocalFS < Storage
 		super
 	end
 
-	def add_update(file)
+	def add_update(file, shared_line=nil)
 		super do
 			file.copy_to target_dir
 		end
@@ -379,7 +379,7 @@ class Storage::GoogleDrive < Storage
 		end
 	end
 
-	def add_update(file)
+	def add_update(file, shared_line=nil)
 		super do
 			if stored_file=target_dir.file_by_title(file.name)
 				stored_file.update_from_file file.abs_path

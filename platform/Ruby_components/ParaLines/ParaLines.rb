@@ -6,12 +6,12 @@ class ParaLines
 		set_flags!
 		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''} }
 
-		# *this can be used if there is a cahce of crash outside of the wrapped threads
-		# if to_file?
-		# 	at_exit do
-		# 		flush unless $!.is_a? SystemExit
-		# 	end
-		# end
+		# *ensure flush at exit
+		if @f_to_file
+			at_exit do
+				flush
+			end
+		end
 
 		if block_given?
 			begin
