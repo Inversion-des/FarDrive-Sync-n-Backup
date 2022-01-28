@@ -1,10 +1,10 @@
+# *frozen_string_literal: true — should not be used here to ensure unique object_id for ''
 
 class ParaLines
-	C_mutex = Mutex.new
 
 	def initialize
 		set_flags!
-		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''} }
+		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''.freeze} }
 
 		# *ensure flush at exit
 		if @f_to_file
@@ -31,12 +31,19 @@ class ParaLines
 	# plines.add_static_line '- 5 workers added'
 	def add_static_line(text)
 		key = text.object_id
-		d = @line_by_key[key]
-		if @f_to_console
-			puts text
-		else  # for file
-			d[:text] += text.to_s
+		MUTEX.synchronize do
+			d = @line_by_key[key]
+			if @f_to_console
+				puts text
+			else  # for file
+				d[:text] += text.to_s
+			end
 		end
+	end
+
+	# plines.add_empty_line
+	def add_empty_line
+		add_static_line ''
 	end
 
 	# done_order_line = plines.add_shared_line 'Done order: '
@@ -61,9 +68,9 @@ class ParaLines
 				d = line_by_key[key]
 				part_col = nil
 
-				C_mutex.synchronize do
+				MUTEX.synchronize do
 					# *we replace placeholder chars like: … or _ or just the last char (order here needed for priority to be able to have _ in text and use … as a placeholder)
-					part_col = d[:col] + (text_.index('…') || text_.index('_') || text_.length-1)
+					part_col = d[:col] + (text_.index('…'.freeze) || text_.index('_'.freeze) || text_.length-1)
 
 					rel.send :output, key, text_
 				end
@@ -72,13 +79,15 @@ class ParaLines
 				Object.new.tap do |o|
 					o.define_singleton_method :close do |end_text|
 						# *print the closing chars in the saved position
-						if f_to_console
-							rel.send :print_in_line,
-								lines_up: line_by_key.count - d[:line],
-								col: part_col,
-								text: end_text
-						else  # for file
-							d[:text][part_col-1, end_text.length] = end_text
+						MUTEX.synchronize do
+							if f_to_console
+								rel.send :print_in_line,
+									lines_up: line_by_key.count - d[:line],
+									col: part_col,
+									text: end_text
+							else  # for file
+								d[:text][part_col-1, end_text.length] = end_text
+							end
 						end
 					end
 				end
@@ -88,7 +97,7 @@ class ParaLines
 
 	# plines.flush
 	# *needed only when @f_to_file
-	# *should be called manually if the block form was not used
+	# *can be called manually if the block form was not used and all the threads are finished
 	def flush
 		puts @line_by_key.map {|key, d| d[:text] }  if @f_to_file
 		@line_by_key.clear
@@ -106,23 +115,25 @@ class ParaLines
 	private \
 	def output(key, text)
 		text = text.to_s
+		MUTEX.sync_if_needed do
 
-		# add line
-		puts if @f_to_console && !@line_by_key.has_key?(key)
+			# add line
+			puts if @f_to_console && !@line_by_key.has_key?(key)
 
-		d = @line_by_key[key]
+			d = @line_by_key[key]
 
-		if @f_to_console
-			print_in_line(
-				lines_up: @line_by_key.count - d[:line],
-				col: d[:col],
-				text: text
-			)
-		else  # for file
-			d[:text] += text
+			if @f_to_console
+				print_in_line(
+					lines_up: @line_by_key.count - d[:line],
+					col: d[:col],
+					text: text
+				)
+			else  # for file
+				d[:text] += text
+			end
+
+			d[:col] += text.length
 		end
-
-		d[:col] += text.length
 	end
 
 
@@ -139,6 +150,18 @@ class ParaLines
 			#{text}
 			\e[u
 		OUT
+	end
+
+
+	MUTEX = Mutex.new
+	def MUTEX.sync_if_needed
+		if owned?
+			yield
+		else
+			synchronize do
+				yield
+			end
+		end
 	end
 
 end

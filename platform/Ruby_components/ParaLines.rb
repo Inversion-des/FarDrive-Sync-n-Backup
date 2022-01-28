@@ -1,1 +1,1 @@
-require_relative 'ParaLines/ParaLines'
+require_relative 'ParaLines/lib/paralines'
