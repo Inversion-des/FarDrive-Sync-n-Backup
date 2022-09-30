@@ -20,6 +20,7 @@ require "signet/errors"
 require "signet/oauth_2"
 require "jwt"
 require "date"
+require "time"
 
 module Signet
   module OAuth2
@@ -880,13 +881,13 @@ module Signet
       end
 
       def grant_type= new_grant_type
-        case new_grant_type
-        when "authorization_code", "refresh_token",
-            "password", "client_credentials"
-          @grant_type = new_grant_type
-        else
-          @grant_type = Addressable::URI.parse new_grant_type
-        end
+        @grant_type =
+          case new_grant_type
+          when "authorization_code", "refresh_token", "password", "client_credentials"
+            new_grant_type
+          else
+            Addressable::URI.parse new_grant_type
+          end
       end
 
       def to_jwt options = {}
@@ -972,8 +973,8 @@ module Signet
           end
           parameters.merge! extension_parameters
         end
-        parameters["client_id"] = client_id unless client_id.nil?
-        parameters["client_secret"] = client_secret unless client_secret.nil?
+        parameters["client_id"] = client_id if !options[:use_basic_auth] && !client_id.nil?
+        parameters["client_secret"] = client_secret if !options[:use_basic_auth] && !client_secret.nil?
         if options[:scope]
           parameters["scope"] = options[:scope]
         elsif options[:use_configured_scope] && !scope.nil?
@@ -990,10 +991,18 @@ module Signet
         options = deep_hash_normalize options
 
         client = options[:connection] ||= Faraday.default_connection
-        url = Addressable::URI.parse(token_credential_uri).normalize.to_s
+        url = Addressable::URI.parse token_credential_uri
         parameters = generate_access_token_request options
         if client.is_a? Faraday::Connection
-          response = client.post url,
+          if options[:use_basic_auth]
+            # The Basic Auth middleware usage differs before and after Faraday v2
+            if Gem::Version.new(Faraday::VERSION).segments.first >= 2
+              client.request :authorization, :basic, client_id, client_secret
+            else
+              client.request :basic_auth, client_id, client_secret
+            end
+          end
+          response = client.post url.normalize.to_s,
                                  Addressable::URI.form_encode(parameters),
                                  "Content-Type" => "application/x-www-form-urlencoded"
           status = response.status.to_i
@@ -1001,7 +1010,11 @@ module Signet
           content_type = response.headers["Content-type"]
         else
           # Hurley
-          response = client.post url, parameters
+          if options[:use_basic_auth]
+            url.user = client_id
+            url.password = client_secret
+          end
+          response = client.post url.normalize.to_s, parameters
           status = response.status_code.to_i
           body = response.body
           content_type = response.header[:content_type]

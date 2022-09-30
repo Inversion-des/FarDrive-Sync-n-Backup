@@ -16,7 +16,7 @@ require "base64"
 require "signet"
 require "multi_json"
 
-module Signet #:nodoc:
+module Signet # :nodoc:
   ##
   # An implementation of http://tools.ietf.org/html/draft-ietf-oauth-v2-10
   #
@@ -78,7 +78,7 @@ module Signet #:nodoc:
       when %r{^application/json.*}
         MultiJson.load body
       when %r{^application/x-www-form-urlencoded.*}
-        Hash[Addressable::URI.form_unencode(body)]
+        Addressable::URI.form_unencode(body).to_h
       else
         raise ArgumentError, "Invalid content type '#{content_type}'"
       end
