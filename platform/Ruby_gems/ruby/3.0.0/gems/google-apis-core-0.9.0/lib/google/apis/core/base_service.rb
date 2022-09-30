@@ -19,7 +19,9 @@ require 'google/apis/core/version'
 require 'google/apis/core/api_command'
 require 'google/apis/core/batch'
 require 'google/apis/core/upload'
+require 'google/apis/core/storage_upload'
 require 'google/apis/core/download'
+require 'google/apis/core/storage_download'
 require 'google/apis/options'
 require 'googleauth'
 require 'httpclient'
@@ -82,7 +84,7 @@ module Google
             end
             break if @max && item_count >= @max
             next_page_token = @last_result.send(@response_page_token_field)
-            break if next_page_token.nil? || next_page_token == page_token
+            break if next_page_token.to_s.empty? || next_page_token == page_token
             page_token = next_page_token
           end
         end
@@ -317,6 +319,26 @@ module Google
           command
         end
 
+        # Create a new storage upload command.
+        # This is specifically for storage because we are moving to a new upload protocol.
+        # Ref: https://cloud.google.com/storage/docs/performing-resumable-uploads
+        #
+        # @param [Symbol] method
+        #  HTTP method for uploading. The initial request to initiate a resumable session
+        #  is :post and the subsequent chunks uploaded to the session are :put
+        # @param [String] path
+        #  Additional path to upload endpoint, appended to API base path
+        # @param [Hash, Google::Apis::RequestOptions] options
+        #  Request-specific options
+        # @return [Google::Apis::Core::StorageUploadCommand]
+        def make_storage_upload_command(method, path, options)
+          template = Addressable::Template.new(root_url + upload_path + path)
+          command = StorageUploadCommand.new(method, template, client_version: client_version)
+          command.options = request_options.merge(options)
+          apply_command_defaults(command)
+          command
+        end
+
         # Create a new download command.
         #
         # @param [symbol] method
@@ -329,6 +351,25 @@ module Google
         def make_download_command(method, path, options)
           template = Addressable::Template.new(root_url + base_path + path)
           command = DownloadCommand.new(method, template, client_version: client_version)
+          command.options = request_options.merge(options)
+          command.query['alt'] = 'media'
+          apply_command_defaults(command)
+          command
+        end
+
+        # Create a new storage download command. This is specifically for storage because
+        # we want to return response header too in the response.
+        #
+        # @param [symbol] method
+        #   HTTP method for uploading (typically :get)
+        # @param [String] path
+        #  Additional path to download endpoint, appended to API base path
+        # @param [Hash, Google::Apis::RequestOptions] options
+        #  Request-specific options
+        # @return [Google::Apis::Core::StorageDownloadCommand]
+        def make_storage_download_command(method, path, options)
+          template = Addressable::Template.new(root_url + base_path + path)
+          command = StorageDownloadCommand.new(method, template, client_version: client_version)
           command.options = request_options.merge(options)
           command.query['alt'] = 'media'
           apply_command_defaults(command)

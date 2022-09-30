@@ -27,7 +27,10 @@ module Google
       class HttpCommand
         include Logging
 
-        RETRIABLE_ERRORS = [Google::Apis::ServerError, Google::Apis::RateLimitError, Google::Apis::TransmissionError]
+        RETRIABLE_ERRORS = [Google::Apis::ServerError,
+                            Google::Apis::RateLimitError,
+                            Google::Apis::TransmissionError,
+                            Google::Apis::RequestTimeOutError]
 
         begin
           require 'opencensus'
@@ -95,13 +98,23 @@ module Google
         # @raise [Google::Apis::ServerError] An error occurred on the server and the request can be retried
         # @raise [Google::Apis::ClientError] The request is invalid and should not be retried without modification
         # @raise [Google::Apis::AuthorizationError] Authorization is required
-        def execute(client)
+        def execute(client, &block)
           prepare!
           opencensus_begin_span
+          do_retry :execute_once, client, &block
+        ensure
+          opencensus_end_span
+          @http_res = nil
+          release!
+        end
+
+        def do_retry func, client
           begin
             Retriable.retriable tries: options.retries + 1,
-                                base_interval: 1,
-                                multiplier: 2,
+                                max_elapsed_time: options.max_elapsed_time,
+                                base_interval: options.base_interval,
+                                max_interval: options.max_interval,
+                                multiplier: options.multiplier,
                                 on: RETRIABLE_ERRORS do |try|
               # This 2nd level retriable only catches auth errors, and supports 1 retry, which allows
               # auth to be re-attempted without having to retry all sorts of other failures like
@@ -110,7 +123,7 @@ module Google
               Retriable.retriable tries: auth_tries,
                                   on: [Google::Apis::AuthorizationError, Signet::AuthorizationError, Signet::RemoteServerError, Signet::UnexpectedStatusError],
                                   on_retry: proc { |*| refresh_authorization } do
-                execute_once(client).tap do |result|
+                send(func, client).tap do |result|
                   if block_given?
                     yield result, nil
                   end
@@ -124,10 +137,6 @@ module Google
               raise e
             end
           end
-        ensure
-          opencensus_end_span
-          @http_res = nil
-          release!
         end
 
         # Refresh the authorization authorization after a 401 error
@@ -163,7 +172,6 @@ module Google
             @form_encoded = true
             self.body = Addressable::URI.form_encode(url.query_values(Array))
             self.header['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-            self.url.query_values = {}
           else
             @form_encoded = false
           end
@@ -212,7 +220,7 @@ module Google
         def check_status(status, header = nil, body = nil, message = nil)
           # TODO: 304 Not Modified depends on context...
           case status
-          when 200...300
+          when 200...300, 308
             nil
           when 301, 302, 303, 307
             message ||= sprintf('Redirect to %s', header['Location'])
@@ -223,6 +231,9 @@ module Google
           when 429
             message ||= 'Rate limit exceeded'
             raise Google::Apis::RateLimitError.new(message, status_code: status, header: header, body: body)
+          when 408
+            message ||= 'Request time out'
+            raise Google::Apis::RequestTimeOutError.new(message, status_code: status, header: header, body: body)
           when 304, 400, 402...500
             message ||= 'Invalid request'
             raise Google::Apis::ClientError.new(message, status_code: status, header: header, body: body)
@@ -276,7 +287,7 @@ module Google
             rescue Google::Apis::Error => e
               err = e
             end
-          elsif err.is_a?(HTTPClient::TimeoutError) || err.is_a?(SocketError)
+          elsif err.is_a?(HTTPClient::TimeoutError) || err.is_a?(SocketError) || err.is_a?(HTTPClient::KeepAliveDisconnected) || err.is_a?(Errno::ECONNREFUSED) || err.is_a?(Errno::ETIMEDOUT)
             err = Google::Apis::TransmissionError.new(err)
           end
           block.call(nil, err) if block_given?

@@ -28,6 +28,10 @@ module Google
     RequestOptions = Struct.new(
       :authorization,
       :retries,
+      :max_elapsed_time,
+      :base_interval,
+      :max_interval,
+      :multiplier,
       :header,
       :normalize_unicode,
       :skip_serialization,
@@ -35,7 +39,8 @@ module Google
       :api_format_version,
       :use_opencensus,
       :quota_project,
-      :query)
+      :query,
+      :add_invocation_id_header)
 
     # General client options
     class ClientOptions
@@ -66,6 +71,15 @@ module Google
       #   @return [Signet::OAuth2::Client, #apply(Hash)] OAuth2 credentials.
       # @!attribute [rw] retries
       #   @return [Fixnum] Number of times to retry requests on server error.
+      # @!attribute [rw] max_elapsed_time
+      #   @return [Fixnum] Total time in seconds that requests are allowed to keep being retried.
+      # @!attribute [rw] base_interval
+      #   @return [Float] The initial interval in seconds between tries.
+      # @!attribute [rw] max_interval
+      #   @return [Fixnum] The maximum interval in seconds that any individual retry can reach.
+      # @!attribute [rw] multiplier
+      #   @return [rw] Each successive interval grows by this factor. A multipler of 1.5 means the next interval 
+      #              will be 1.5x the current interval.
       # @!attribute [rw] header
       #   @return [Hash<String,String>] Additional HTTP headers to include in requests.
       # @!attribute [rw] normalize_unicode
@@ -82,6 +96,8 @@ module Google
       #   @return [String] Project ID to charge quota, or `nil` to default to the credentials-specified project.
       # @!attribute [rw] query
       #   @return [Hash<String,String>] Additional HTTP URL query parameters to include in requests.
+      # @!attribute [rw] add_invocation_id_header
+      #   @return [Boolean] True if the header gccl-invocation-id need to be set
 
       # Get the default options
       # @return [Google::Apis::RequestOptions]
@@ -106,11 +122,16 @@ module Google
     ClientOptions.default.application_version = '0.0.0'
     ClientOptions.default.transparent_gzip_decompression = true
     RequestOptions.default.retries = 0
+    RequestOptions.default.max_elapsed_time = 900
+    RequestOptions.default.base_interval = 1
+    RequestOptions.default.max_interval = 60
+    RequestOptions.default.multiplier = 2
     RequestOptions.default.normalize_unicode = false
     RequestOptions.default.skip_serialization = false
     RequestOptions.default.skip_deserialization = false
     RequestOptions.default.api_format_version = nil
     RequestOptions.default.use_opencensus = true
     RequestOptions.default.quota_project = nil
+    RequestOptions.default.add_invocation_id_header = false
   end
 end
