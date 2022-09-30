@@ -4,7 +4,7 @@
 #
 # Domain name parser based on the Public Suffix List.
 #
-# Copyright (c) 2009-2020 Simone Carletti <weppos@weppos.net>
+# Copyright (c) 2009-2022 Simone Carletti <weppos@weppos.net>
 
 module PublicSuffix
 
@@ -125,16 +125,15 @@ module PublicSuffix
       # @param  private [Boolean]
       def initialize(value:, length: nil, private: false)
         @value    = value.to_s
-        @length   = length || @value.count(DOT) + 1
+        @length   = length || (@value.count(DOT) + 1)
         @private  = private
       end
 
       # Checks whether this rule is equal to <tt>other</tt>.
       #
-      # @param  [PublicSuffix::Rule::*] other The rule to compare
-      # @return [Boolean]
-      #   Returns true if this rule and other are instances of the same class
-      #   and has the same value, false otherwise.
+      # @param  other [PublicSuffix::Rule::*] The rule to compare
+      # @return [Boolean] true if this rule and other are instances of the same class
+      #         and has the same value, false otherwise.
       def ==(other)
         equal?(other) || (self.class == other.class && value == other.value)
       end
@@ -162,7 +161,7 @@ module PublicSuffix
       # @param  name [String] the domain name to check
       # @return [Boolean]
       def match?(name)
-        # Note: it works because of the assumption there are no
+        # NOTE: it works because of the assumption there are no
         # rules like foo.*.com. If the assumption is incorrect,
         # we need to properly walk the input and skip parts according
         # to wildcard component.
@@ -176,7 +175,7 @@ module PublicSuffix
       end
 
       # @abstract
-      # @param  [String, #to_s] name The domain name to decompose
+      # @param  domain [#to_s] The domain name to decompose
       # @return [Array<String, nil>]
       def decompose(*)
         raise NotImplementedError
@@ -196,7 +195,7 @@ module PublicSuffix
 
       # Decomposes the domain name according to rule properties.
       #
-      # @param  [String, #to_s] name The domain name to decompose
+      # @param  domain [#to_s] The domain name to decompose
       # @return [Array<String>] The array with [trd + sld, tld].
       def decompose(domain)
         suffix = parts.join('\.')
@@ -222,12 +221,13 @@ module PublicSuffix
       # @param  content [String] the content of the rule
       # @param  private [Boolean]
       def self.build(content, private: false)
-        new(value: content.to_s[2..-1], private: private)
+        new(value: content.to_s[2..], private: private)
       end
 
       # Initializes a new rule.
       #
       # @param  value [String]
+      # @param  length [Integer]
       # @param  private [Boolean]
       def initialize(value:, length: nil, private: false)
         super(value: value, length: length, private: private)
@@ -243,7 +243,7 @@ module PublicSuffix
 
       # Decomposes the domain name according to rule properties.
       #
-      # @param  [String, #to_s] name The domain name to decompose
+      # @param  domain [#to_s] The domain name to decompose
       # @return [Array<String>] The array with [trd + sld, tld].
       def decompose(domain)
         suffix = ([".*?"] + parts).join('\.')
@@ -266,10 +266,10 @@ module PublicSuffix
 
       # Initializes a new rule from the content.
       #
-      # @param  content [String] the content of the rule
+      # @param  content [#to_s] the content of the rule
       # @param  private [Boolean]
       def self.build(content, private: false)
-        new(value: content.to_s[1..-1], private: private)
+        new(value: content.to_s[1..], private: private)
       end
 
       # Gets the original rule definition.
@@ -281,7 +281,7 @@ module PublicSuffix
 
       # Decomposes the domain name according to rule properties.
       #
-      # @param  [String, #to_s] name The domain name to decompose
+      # @param  domain [#to_s] The domain name to decompose
       # @return [Array<String>] The array with [trd + sld, tld].
       def decompose(domain)
         suffix = parts.join('\.')
@@ -299,7 +299,7 @@ module PublicSuffix
       #
       # @return [Array<String>]
       def parts
-        @value.split(DOT)[1..-1]
+        @value.split(DOT)[1..]
       end
 
     end
@@ -321,7 +321,7 @@ module PublicSuffix
     #   PublicSuffix::Rule.factory("!congresodelalengua3.ar")
     #   # => #<PublicSuffix::Rule::Exception>
     #
-    # @param  [String] content The rule content.
+    # @param  content [#to_s] the content of the rule
     # @return [PublicSuffix::Rule::*] A rule instance.
     def self.factory(content, private: false)
       case content.to_s[0, 1]

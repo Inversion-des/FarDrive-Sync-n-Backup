@@ -12,7 +12,7 @@ GEM
   remote: https://rubygems.org/
   specs:
     addressable (2.8.1)
-      public_suffix (>= 2.0.2, < 5.0)
+      public_suffix (>= 2.0.2, < 6.0)
     bootsnap (1.8.1)
       msgpack (~> 1.0)
     declarative (0.0.20)
@@ -72,9 +72,9 @@ GEM
     nokogiri (1.13.8-x64-mingw32)
       racc (~> 1.4)
     os (1.1.1)
-    public_suffix (4.0.6)
     racc (1.5.2)
     representable (3.1.1)
+    public_suffix (5.0.0)
       declarative (< 0.1.0)
       trailblazer-option (>= 0.1.1, < 0.2.0)
       uber (< 0.2.0)
