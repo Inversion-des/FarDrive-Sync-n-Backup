@@ -10,7 +10,7 @@ module JWT
     }.freeze
 
     class << self
-      %w[verify_aud verify_expiration verify_iat verify_iss verify_jti verify_not_before verify_sub].each do |method_name|
+      %w[verify_aud verify_expiration verify_iat verify_iss verify_jti verify_not_before verify_sub verify_required_claims].each do |method_name|
         define_method method_name do |payload, options|
           new(payload, options).send(method_name)
         end
@@ -19,6 +19,7 @@ module JWT
       def verify_claims(payload, options)
         options.each do |key, val|
           next unless key.to_s =~ /verify/
+
           Verify.send(key, payload, options) if val
         end
       end
@@ -53,9 +54,14 @@ module JWT
 
       iss = @payload['iss']
 
-      return if Array(options_iss).map(&:to_s).include?(iss.to_s)
+      options_iss = Array(options_iss).map { |item| item.is_a?(Symbol) ? item.to_s : item }
 
-      raise(JWT::InvalidIssuerError, "Invalid issuer. Expected #{options_iss}, received #{iss || '<none>'}")
+      case iss
+      when *options_iss
+        nil
+      else
+        raise(JWT::InvalidIssuerError, "Invalid issuer. Expected #{options_iss}, received #{iss || '<none>'}")
+      end
     end
 
     def verify_jti
@@ -77,8 +83,17 @@ module JWT
 
     def verify_sub
       return unless (options_sub = @options[:sub])
+
       sub = @payload['sub']
       raise(JWT::InvalidSubError, "Invalid subject. Expected #{options_sub}, received #{sub || '<none>'}") unless sub.to_s == options_sub.to_s
+    end
+
+    def verify_required_claims
+      return unless (options_required_claims = @options[:required_claims])
+
+      options_required_claims.each do |required_claim|
+        raise(JWT::MissingRequiredClaim, "Missing required claim #{required_claim}") unless @payload.include?(required_claim)
+      end
     end
 
     private
