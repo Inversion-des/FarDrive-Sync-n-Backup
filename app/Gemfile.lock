@@ -68,7 +68,7 @@ GEM
     mini_mime (1.1.2)
     msgpack (1.4.2)
     multi_json (1.15.0)
-    multipart-post (2.1.1)
+    multipart-post (2.2.3)
     nokogiri (1.13.8-x64-mingw32)
       racc (~> 1.4)
     os (1.1.1)
