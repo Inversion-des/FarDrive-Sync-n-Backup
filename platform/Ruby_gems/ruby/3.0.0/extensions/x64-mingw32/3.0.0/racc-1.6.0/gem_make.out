@@ -1,0 +1,18 @@
+current directory: D:/Designing/#Base/Ruby/FarDriveSync/platform/Ruby_gems_dev-ori/ruby/3.0.0/gems/racc-1.6.0/ext/racc/cparse
+D:/statsoft/Ruby/3.0/bin/ruby.exe -I D:/statsoft/Ruby/3.0/lib/ruby/site_ruby/3.0.0 -r ./siteconf20220930-7332-m690sa.rb extconf.rb
+checking for rb_block_call()... yes
+checking for rb_ary_subseq()... yes
+creating Makefile
+
+current directory: D:/Designing/#Base/Ruby/FarDriveSync/platform/Ruby_gems_dev-ori/ruby/3.0.0/gems/racc-1.6.0/ext/racc/cparse
+make DESTDIR\= clean
+
+current directory: D:/Designing/#Base/Ruby/FarDriveSync/platform/Ruby_gems_dev-ori/ruby/3.0.0/gems/racc-1.6.0/ext/racc/cparse
+make DESTDIR\=
+generating cparse-x64-mingw32.def
+compiling cparse.c
+linking shared-object racc/cparse.so
+
+current directory: D:/Designing/#Base/Ruby/FarDriveSync/platform/Ruby_gems_dev-ori/ruby/3.0.0/gems/racc-1.6.0/ext/racc/cparse
+make DESTDIR\= install
+/usr/bin/install -c -m 0755 cparse.so ./.gem.20220930-7332-ego3tx/racc
