@@ -9,8 +9,8 @@ gem 'win32-process'
 
 gem 'google_drive', github: 'Inversion-des/google-drive-ruby'
 # https://github.com/Inversion-des/google-drive-ruby
-# using until this pull request not accepted (or any other needed changes) — https://github.com/gimite/google-drive-ruby/pull/406
-# last review — 16.06.21
+# using until this pull request not accepted (or any other needed changes) â€” https://github.com/gimite/google-drive-ruby/pull/406
+# last review â€” 30.09.22
 
 
 # bundle install --with dev
