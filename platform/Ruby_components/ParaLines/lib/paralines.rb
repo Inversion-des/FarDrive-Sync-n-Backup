@@ -4,12 +4,20 @@ class ParaLines
 
 	def initialize
 		set_flags!
-		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''.freeze} }
+		@line_by_key = Hash.new {|h, key| h[key] = {line:h.length, col:1, text:''} }
 
 		# *ensure flush at exit
 		if @f_to_file
 			at_exit do
-				flush
+				flush final:true
+			end
+			# flush every 3 sec in bg thread
+			# *fixed problem that if there is an endless loop — there will be no output to file in the process and when you terminate the app
+			Thread.new do
+				loop do
+					sleep 3
+					flush
+				end
 			end
 		end
 
@@ -17,7 +25,7 @@ class ParaLines
 			begin
 				yield self
 			ensure
-				flush
+				flush final:true
 			end
 		end
 	end
@@ -49,9 +57,9 @@ class ParaLines
 	# done_order_line = plines.add_shared_line 'Done order: '
 	# done_order_line << 'some text'
 	# part = shared_line.part_open "#{n}… " + later: part.close '+'
-	# *can output part progress by adding dots: [LS   ] [cloud2…   ] --> [LS....] [cloud2…   ] — call .close('.' * done_count) multiple times with increasing number of dots
+	# *can output partial progress by adding dots: [LS   ] [cloud2…   ] --> [LS....] [cloud2…   ] — call .close('.' * done_count) multiple times with increasing number of dots
 	# *this line can be used by many threads
-	def add_shared_line(text)
+	def add_shared_line(text='')
 		key = text.object_id
 		output key, text
 		# < helper obj with the << and .part_open methods
@@ -64,7 +72,7 @@ class ParaLines
 				rel.send :output, key, text
 			end
 
-			o.define_singleton_method :part_open do |text_|
+			o.define_singleton_method :part_open do |text_='…'|
 				d = line_by_key[key]
 				part_col = nil
 
@@ -90,25 +98,52 @@ class ParaLines
 							end
 						end
 					end
+					class << o
+						alias :update close
+					end
 				end
 			end
 		end
 	end
 
-	# plines.flush
+	def ask(text)
+		text += ': '
+		key = text.object_id
+		MUTEX.synchronize do
+			d = @line_by_key[key]
+			if @f_to_console
+				print text
+			else  # for file
+				d[:text] += text.to_s
+			end
+			answer = ((( $stdin.gets ))).chomp
+			d[:text] += answer
+			yield answer if block_given?
+		end
+	end
+
+	# plines.flush final:true
 	# *needed only when @f_to_file
 	# *can be called manually if the block form was not used and all the threads are finished
-	def flush
-		puts @line_by_key.map {|key, d| d[:text] }  if @f_to_file
-		@line_by_key.clear
+	def flush(final:false)
+		if @f_to_file
+			# *rewind need for periodical bg flush
+			@initial_pos ||= STDOUT.pos
+			STDOUT.pos = @initial_pos
+			puts @line_by_key.map {|key, d| d[:text] }
+		end
+		@line_by_key.clear if final
 	end
 
 
 	# *needed for rewriting in tests
 	private \
 	def set_flags!
-		@f_to_console = $>.tty?
-		@f_to_file = !$>.tty?
+		# *better to use STDOUT const instead of $>, because in tests we can redefine STDOUT for this class only
+		@f_to_console = STDOUT.tty?
+		@f_to_file = !STDOUT.tty?
+#		@f_to_console = $>.tty?
+#		@f_to_file = !$>.tty?
 	end
 
 
@@ -129,7 +164,11 @@ class ParaLines
 					text: text
 				)
 			else  # for file
-				d[:text] += text
+				# *we have to do this and not just  d[:text] += text  because part.update can add more text to the part then reserved
+				#   and it should not move the start_pos for the next << operation. In the Ticker we check more_chars_used
+				#   to resoleve overwriting for console and without these changes it added redundant gap for the file
+				start_pos = d[:col]-1
+				d[:text][start_pos..-1] = text
 			end
 
 			d[:col] += text.length
@@ -151,6 +190,18 @@ class ParaLines
 			\e[u
 		OUT
 	end
+	
+	
+	# *this allows to change STDOUT like this:
+	#   ParaLines::STDOUT = C_w_file
+	private \
+	def puts(t=nil)
+		STDOUT.puts t
+	end
+	private \
+	def print(t=nil)
+		STDOUT.print t
+	end
 
 
 	MUTEX = Mutex.new
@@ -164,4 +215,72 @@ class ParaLines
 		end
 	end
 
+end
+
+
+
+class ParaLines::WaitPoint
+	def initialize(name='?')
+		@name = name
+		@q = Queue.new
+	end
+	def wait
+		# using defaults: delay:3, int:1
+		Ticker[title:"WaitPoint #{@name} took"] do
+			((( @q.pop )))
+		end
+	end
+	def done!
+		@q << true
+	end
+end
+
+
+
+class ParaLines::Ticker
+	def self.[](...)
+		self.new(...)
+	end
+	
+	def initialize(delay:3, int:1, title:'working', plines:C_plines, shared_line:nil)
+		@start = moment
+		gap = shared_line ? ' ' : ''   # gap needed only if the shared_line passed
+		shared_line = nil
+		f_initial_print_done = false
+		took_part = nil
+		thr = Thread.new do
+			sleep delay
+			loop do
+				if !f_initial_print_done
+					f_initial_print_done = true
+					shared_line ||= plines.add_shared_line
+					took_part = shared_line.part_open "#{gap}[#{title} ….0 s]"
+				end
+				took_part.update "%.1f s…" % seconds
+				sleep int
+			end
+		end
+		
+		((( yield )))
+		
+		thr.kill
+		# close took_part
+		if took_part
+			# reserve more chars for took_part so the next << output to this line will not overwrite some last chars
+			seconds_part = "%.1f" % seconds
+			more_chars_used = seconds_part.length - 3
+			if more_chars_used > 0
+				shared_line << ' '*more_chars_used
+			end
+			
+			took_part.close "#{seconds_part} s]"
+		end
+	end
+	
+	def seconds
+		moment - @start
+	end
+	def moment
+		Process.clock_gettime Process::CLOCK_MONOTONIC
+	end
 end

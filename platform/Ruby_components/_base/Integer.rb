@@ -62,16 +62,18 @@ class Integer
 
 	# readable file size
 	# file.size.readable
-	# file.size.hr
-	def readable
+	# file.size.hr in_:'MB'
+	def readable(in_:nil, html:nil)
 		size = self.to_f
-		case
+		res = case
 			when size < 1.KB then "%d B" % size
-			when size < 1.MB then "%.1f KB" % (size / 1.KB)
-			when size < 1.GB then "%.1f MB" % (size / 1.MB)
+			when size < 1.MB || in_=='KB' then "%.1f KB" % (size / 1.KB)
+			when size < 1.GB || in_=='MB' then "%.1f MB" % (size / 1.MB)
 			else "%.3f GB" % (size / 1.GB)
 		end\
 			.sub(/\.0+ /, ' ')  	# 1.0 MB => 1 MB
+		res.sub!(/\.\d+/, '<i>\&</i>') if html == 'fraction'
+		res
 	end
 	# human readable
 	alias :hr readable

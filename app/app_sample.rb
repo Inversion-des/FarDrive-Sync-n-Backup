@@ -249,7 +249,7 @@ class App
 		puts
 		ver_file = 'build.txt'
 		ver = File.read(ver_file) rescue "[#{ver_file} missed]"
-		puts '=== ' + Time.now.to_s + " ( v#{ver} / #{RUBY_PLATFORM} ) " + '='*45  # date & ver marker
+		puts '=== ' + Time.now.to_s + " ( v#{ver} / Ruby v#{RUBY_VERSION} ) " + '='*45  # date & ver marker
 
 		# run with 'below normal' CPU piority
 		require 'win32/process'
@@ -262,9 +262,10 @@ class App
 			# *for .down we ensure that set_dir will be not the same as for .up
 			set_mod: @local==@local_2 ? '(2)' : '',
 			# multiple dirs sample
-#			local:
-#				dir_1: 'C:/path/to/dir_1'
+#			local: {
+#				dir_1: 'C:/path/to/dir_1',
 #				dir_2: 'D:/path/to/dir_2'
+#			},
 			conf: {
 				# default: 5 MB
 				pack_max_size_bytes: 10.MB

@@ -92,10 +92,12 @@ class Ruby7Zip < ZipEngine
 	end
 	def config(zip)
 		# Compression level: 0, 1, 3, (5), 7 or 9
-		zip.level = 7
+		# 21.09.22: changed 5 -> 7 (for many PSD files takes too long)
+		zip.level = 5
 		# Compression method: “LZMA”, (“LZMA2”), “PPMd”, “BZIP2”, “DEFLATE” or “COPY”
 		zip.method = 'LZMA2'
 		# zip.solid = false
+		# zip.multi_thread = no   # by default it uses multiple cores
 	end
 	def base_size
 		@base_size ||= begin
@@ -154,10 +156,12 @@ class Ruby7Zip < ZipEngine
 					for file in @files
 						# *this way ignores files attributes
 						data = @cache_data_by_fp[file.path] || file.binread
+						# (LONG? - no only when the block is finished — it is compressed)
 						zip.add_data data, file.d.as
 						# zip.add_file fp, as:File.basename(fp)
 						clear_file_d file
 					end
+					# -- (LONG) all files added — now .compress is called --
 				end
 				buffer.string
 			end
@@ -170,14 +174,22 @@ class Ruby7Zip < ZipEngine
 		#  tried to add dependance from files count but it caused sometimes that total size decreased after adding some small file and the pack calibration logic was broken
 		return @size.div 1.1
 	end
-	# cls.new(fp:'db2.7z').pack_dir dir_or_path
-	def pack_dir(path)
+	# cls.new(fp:'db2.7z').pack_dir dir_or_path, skip_by_path:['path']|{'path' => 1}
+	def pack_dir(path, skip_by_path:{})
+		if skip_by_path.array?
+			skip_by_path = skip_by_path.create_index
+		end
 		dir = IDir.new path
+		# *this operation can fail with an error: UpdateItems error (StandardError)
+		#  if some added file is deleted in the middle of the compression process (deletion of DirDB tmp file caused this)
 		SevenZipRuby::Writer.open_file(@file) do |zip|
 			for file in dir.files
+				# *skip DirDB tmp files
+				next if skip_by_path[file.path] || file.name.includes?('__tmp.')
 				zip.add_file file, as:file.name
 			end
 			dir.dirs.each do |subdir|
+				next if skip_by_path[subdir.path]
 				dir.in do
 					zip.add_directory subdir.path
 				end

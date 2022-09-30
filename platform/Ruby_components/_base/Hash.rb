@@ -1,10 +1,14 @@
 class Hash
 
-	# -deep clone (-clone -dup)
+	# -deep clone (-clone -dup -copy)
 	def deep_dup
 		Marshal.load(Marshal.dump self)
 	end
 	alias :deep_clone deep_dup
+		
+	def |(oth)
+		self.empty? ? oth : self
+	end
 
 	# -deep merge (-merge)
 	def deep_merge(second)

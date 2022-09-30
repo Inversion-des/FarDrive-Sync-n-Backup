@@ -41,24 +41,24 @@ class StorageArray
 	end
 
 	def get(name, to:nil)
-		if storage=storage_by(name)
-			storage.get(name, to:to)
-		else
-			if name.in? C_special_files
-				# try to get that file from all the storages in parallel
-				file = nil
-				threads = []
-				storages.map do |storage|
-					threads << Thread.new do
-						file ||= storage.get(name, to:to)
-						threads.each &:kill
-					rescue Storage::FileNotFound
-						:ignore
-					end
+		if name.in? C_special_files
+			# try to get that file from all the storages in parallel
+			file = nil
+			threads = []
+			storages.map do |storage|
+				threads << Thread.new do
+					file ||= storage.get(name, to:to)
+					threads.each &:kill
+				rescue Storage::FileNotFound
+					:ignore
 				end
-				threads.each &:join
+			end
+			threads.each &:join
 
-				file || raise(FileNotFound, name)
+			file || raise(FileNotFound, name)
+		else
+			if storage=storage_by(name)
+				storage.get(name, to:to)
 			else
 				raise FileNotFound, name
 			end
@@ -81,7 +81,7 @@ class StorageArray
 			fn = file.name
 			# select storages
 			possible_storages = []
-			if storage=storage_by(fn)   # if file update
+			if storage=storage_by(fn)   # if file update — use same storage
 				free_space = storage.free_space + files_map[fn].size
 				if free_space > file.size
 					possible_storages << storage
@@ -101,6 +101,7 @@ class StorageArray
 																																										# do^part = shared_line?.part_open "(=key - =storage.key =storage.used_space_perc%… "
 																																										part = shared_line.and.part_open "(#{key} - #{storage.key} #{storage.used_space_perc}%… "
 																																										#-#!!_ w^  (array - =key) add_update to: =storage.key
+					# *if file already there — it will be skipped if it is the same (check on each storage level)
 					storage.add_update file
 																																										# do^part?.close ')'
 																																										part.and.close ')'
@@ -109,7 +110,7 @@ class StorageArray
 						storage: storage.key.to_s,
 						# *7z creates files with slightly different size and it breaks compare_packs!
 						#  so here we round size (-1 is not enough)
-						size: (DirDB.dev? && fn.end_with?('.7z')) ? file.size.round(-2) : file.size
+						size: (TESTS && fn.end_with?('.7z')) ? file.size.round(-2) : file.size
 					)
 					storage.update_stats
 				else
@@ -137,9 +138,10 @@ class StorageArray
 			# "1_2021.08.08"=>{storage:'GoogleDrive_1', size:777}
 			@files_map ||= begin
 				map = Hash.new {|h, k| h[k]={}.extend(FileDataExt) }
+				# *stored in storages.dat
 				if h=@db._files_map
 					h.each do |k, v|
-						map[k] = v.extend(FileDataExt)
+						map[k].update v
 					end
 				else
 																																										w("files_map -- auto-discovery")
@@ -167,7 +169,7 @@ class StorageArray
 		# useful if for some storage there is no quota (unlimited storage)
 		elsif @strategy == 'even_MB'
 			storages.sort_by {|_| [_.used_space, storages.index(_)] }
-		else   # even (default, get less used first)
+		else   # even (default, get less used % first)
 			# for debug add: print("[=.used_space_perc] ");
 			storages.sort_by {|_| [_.used_space_perc, storages.index(_)] }
 		end

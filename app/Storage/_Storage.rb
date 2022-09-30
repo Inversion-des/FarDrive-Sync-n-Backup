@@ -5,6 +5,7 @@
 class Storage
 	C_storage_dir_name ||= 'FarDrive_storage'   # can be already defined in tests
 	C_input_mutex = Mutex.new
+	include MonitorMixin
 
 	#- for class
 	class << self
@@ -37,8 +38,12 @@ class Storage
 						#. *on clouds mtime is not the original so we cannot rely on it
 						#  maybe we should have some mtime_preserved flag for storage
 						# found_file.mtime == file.mtime
+		
 						# *risky: what if content is different?
-						found_file.size == file.size
+						# found_file.size == file.size
+		
+						# 19.09.22 trying to use checksum (found that GDrive supports this) — may be unsupported by other storages
+						found_file.md5_checksum == file.md5_checksum
 					end
 				end
 			add_files.sort_by! &:name
@@ -215,6 +220,13 @@ class Storage::LocalFS < Storage
 
 	def add_update(file, shared_line=nil)
 		super do
+			# (<!) skip if file already exists
+			target_file = target_dir/file.name
+			if target_file.exists? && file.same_as(target_file, by: :checksum)
+				w "(add_update) target_file already exists: #{target_file} -- skipping"
+				return
+			end
+
 			file.copy_to target_dir
 		end
 	end
@@ -322,7 +334,7 @@ class Storage::GoogleDrive < Storage
 				#. Drive API scopes — https://developers.google.com/drive/api/v3/about-auth
 				#  we need only permission to create a dir and manage files inside that dir
 				scope: ['https://www.googleapis.com/auth/drive.file'],
-				redirect_uri: "urn:ietf:wg:oauth:2.0\:oob",
+				redirect_uri: 'http://127.0.0.1:7117',
 				additional_parameters: {access_type:'offline'},
 				state: 'gcd'   # *maybe helps to get rid of an additional step (works not for all)
 			)
@@ -332,16 +344,34 @@ class Storage::GoogleDrive < Storage
 				if token=@db_global.refresh_token
 					credentials.refresh_token = token
 				else
-					# get auth code in browser
+					# get auth code via browser
 					C_input_mutex.sync do
 						auth_url = credentials.authorization_uri
+						# copy url to clipboard
 						IO.popen('clip', 'w') {|_| _.write auth_url.to_s }
-						puts "\n1) Open this page in your browser for [[ #{@account} ]] account (URL ALREADY COPIED to clipboard):\n  #{auth_url}"
-						print '2) When auth done -- copy the received code to clipboard and JUST HIT ENTER here:'
-						((( $stdin.gets )))
-						authorization_code = `powershell get-clipboard`.chomp
-						puts "  #{authorization_code}"
-						credentials.code = authorization_code
+						# show msg
+						putsn "\nOpen this page in your browser for [[ #{@account} ]] account (URL ALREADY COPIED to clipboard):\n  #{auth_url}"
+						print 'Waiting for OAuth 2.0 authorization in the browser...'
+
+						#-- run a simple server and wait for the callback
+						require 'socket'
+						thr = Thread.new do
+							Socket.tcp_server_loop(7117) do |socket|
+								get_line = socket.gets   # read the first line
+								# http://127.0.0.1:7117/?code=4/0ARtbsJpOXYfLtrBw8Rlc2ByR…GkTXZ4mnjmJdcV_fVIs4Q&scope=https://www.googleapis.com/auth/drive.file
+								# GET /?code=4/0ARtbsJpOXYfLtrBw8Rl…GkTXZ4mnjmJdcV_fVIs4Q&scope=https://www.googleapis.com/auth/drive.file HTTP/1.1
+								credentials.code = get_line[/code=(.+?)&/, 1] || raise(KnownError, 'token not found')
+								# response
+								socket.puts "HTTP/1.1 200\r\n\r\n"
+								socket.puts 'Received code: ' + credentials.code + "\nReturn to the app now.\nThis page can be closed."
+							ensure
+								socket.close
+								thr.kill   # terminate the server
+							end
+						end
+						trap('SIGINT') { thr.kill }
+						((( thr.join )))
+						puts 'done'
 					end
 				end
 
@@ -382,6 +412,12 @@ class Storage::GoogleDrive < Storage
 	def add_update(file, shared_line=nil)
 		super do
 			if stored_file=target_dir.file_by_title(file.name)
+				# (<!) skip if file already exists
+				if file.md5_checksum == stored_file.md5_checksum
+					w "(add_update) stored_file already exists: #{file} -- skipping"
+					return
+				end
+
 				stored_file.update_from_file file.abs_path
 			else
 				# *allows to upload files with the same name
@@ -464,35 +500,39 @@ class Storage::GoogleDrive < Storage
 	end
 
 	def storage_dir
-		@storage_dir ||= begin
-			# *session.collection_by_title — throws error because tries to work with the root dirs (no permission)
-			# this file_by_title actually finds the dir
-			dir = session.file_by_title @dir_name
-			if !dir
-				if mode == :up   # default
-					dir = create_dir @dir_name
-					if @in_storage_dir
-						# *add dir with a warn tittle ("warn-dir")
-						#   there is a problem that if we upload some files to this dir manually (like via web UI) this app cannot see/access them because they
-						#   are not created with the app; also we cannot clear/delete this dir, there will be an error;
-						#     appNotAuthorizedToChild: The user has not granted the app 525741267076 write access to the child file 1RjqzReTiTwV-riDq8Eged05YVzArrY5v, which would be affected by the operation on the parent. (Google::Apis::ClientError)
-						res = dir.create_subcollection C_warn_dir_name
+		sync do
+			@storage_dir ||= begin
+				# *session.collection_by_title — throws error because tries to work with the root dirs (no permission)
+				# this file_by_title actually finds the dir
+				dir = session.file_by_title @dir_name
+				if !dir
+					if mode == :up   # default
+						dir = create_dir @dir_name
+						if @in_storage_dir
+							# *add dir with a warn tittle ("warn-dir")
+							#   there is a problem that if we upload some files to this dir manually (like via web UI) this app cannot see/access them because they
+							#   are not created with the app; also we cannot clear/delete this dir, there will be an error;
+							#     appNotAuthorizedToChild: The user has not granted the app 525741267076 write access to the child file 1RjqzReTiTwV-riDq8Eged05YVzArrY5v, which would be affected by the operation on the parent. (Google::Apis::ClientError)
+							res = dir.create_subcollection C_warn_dir_name
+						end
+					else
+						raise KnownError, "(#{@key}) dir '#{@dir_name}' is missed"
 					end
-				else
-					raise KnownError, "(#{@key}) dir '#{@dir_name}' is missed"
 				end
-			end
 
-			dir
+				dir
+			end
 		end
 	end
 
 	def set_dir
-		@set_dir ||= begin
-			storage_dir.subcollection_by_title(@set) || storage_dir.create_subcollection(@set)
+		sync do |_|
+			@set_dir ||= begin
+				storage_dir.subcollection_by_title(@set) || storage_dir.create_subcollection(@set)
+			end
 		end
 	end
-																																							#~ GoogleDrive
+																																							#_ GoogleDrive
 	# do not create, just check
 	def set_dir_exists?
 		storage_dir.subcollection_by_title(@set)

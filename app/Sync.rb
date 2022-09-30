@@ -47,8 +47,6 @@ require 'ParaLines'
 require_relative 'ZipEngine'
 Thread.abort_on_exception = true
 
-
-
 #- refinements
 module Refinements
 	refine IFile do
@@ -64,8 +62,9 @@ end
 using Refinements
 
 
-
+Shared = {}
 C_plines = ParaLines.new
+
 
 # *for debugging
 def w(text)
@@ -211,7 +210,7 @@ class Sync
 #		@tmp_dir ?= IDir.new('z_tmp').create.clear!
 
 
-	attr :db, :set, :files, :dirs, :stats, :ignore_by_path, :tree, :trees, :start_dir, :tmp_dir
+	attr :db, :set, :files, :dirs, :stats, :ignore_by_path, :tree, :trees, :start_dir, :tmp_dir, :not_finished
 	# set_mod: '(2)' — modifier that can be used to restore local dir to some other local dir (set_dir should be different to work correctly)
 	def initialize(set:C_def_set_name, set_mod:'', local:nil, remote:nil, conf:{}, on:nil)
 		@set = set
@@ -226,6 +225,7 @@ class Sync
 		@dirs = []
 		@status = {}
 		@stats = {}
+		@uploading_threads = []
 		set_at!   # *needed for tests
 		@hub = Hub.new
 
@@ -254,13 +254,14 @@ class Sync
 		Sync.start_dir   # cache dir
 		@start_dir = IDir.new '.'
 		set_dir_name = @set+@set_mod
-
+																																										w(%Q{set_dir_name=}+set_dir_name.inspect)
 		# (tmp) migrate to the new data structure (1/2)
 		if @start_dir[:db_global].exists? && !@start_dir['.db'].exists?
 																																										w("migrate db_global")
 			@start_dir[:db_global] >> @start_dir/'.db'
 			@start_dir[:db_global].del!
 		end
+		# - move .db from local dir to the app dir
 		for key, dir in @local_dirs
 			# *in tests we use app dir as a local dir so it contains .db
 			set_dir = @start_dir/'.db/sets'/set_dir_name
@@ -295,6 +296,7 @@ class Sync
 			)
 		end
 
+		@not_finished = NotFinished.new(db:@db)
 		Chunk.set_db @db.data_by_file_key
 		@tmp_dir = IDir.new 'z_tmp'
 
@@ -378,10 +380,31 @@ class Sync
 
 	# -up
 	def up
-																																										w("\n")
-																																										w("up")
+																																										w("\nup")
 		Shared.mode = :up   # fail if storage_dir already exists
 		init
+
+		# finish not_finished uploadings if needed
+		if @not_finished.uploadings.not.empty?
+																																										w("=== finish not_finished uploads (#{@not_finished.uploadings.n}) ===")
+			# upload packs
+			@not_finished.uploadings.dup.each do |pack_fn|
+				pack_file = @tmp_dir/pack_fn
+				#! 30% copy from main upload process
+				uploading_line = C_plines.add_shared_line "(in thr) > > >  #{pack_file.name} (#{pack_file.size.hr}): "
+				@uploading_threads << Thread.new do
+					# move archive to remote dir on all storages (in parallel) - (2/2)
+					h_storage.for_each(uploading_line) {|_| _.add_update pack_file, uploading_line }
+					# -- file copied/uploaded to all storages --
+					@not_finished.uploadings.pull pack_fn
+					@not_finished.save
+					# *files_map and storage stats are updated only after upload
+					h_storage.save_db   # storages.dat (1/3)
+					pack_file.del!
+				end
+			end
+		end
+
 		# *needed to be able to call .up again
 		@status.clear
 
@@ -417,10 +440,13 @@ class Sync
 			@tree.state = Hash.new {|h, k| h[k]=[] }   # used for checks in tests
 			@trees = {}
 			skipped = []
+
+			# scan changes in local dirs, defines: @trees, @dirs (all), @files (added and changed), skipped, @tree.stats/state
 			@local_dirs.each do |key, dir|
 				dirs = get_branch_dirs dir
 				@dirs += dirs
 				db = DirDB.new key, dir:@db.dir, bin: ['tree_data']   # dir db
+				#. *changes detected here
 				tree = build_tree key, dir, dirs, db
 				@trees[key] = tree
 
@@ -444,10 +470,94 @@ class Sync
 			# *we cannot get size of deleted file and we do not store it in file.d
 			# @tree.stats.files_removed_size = @state.removed.files.sum(&:size).hr
 																																										#-#!!_ o^@tree.stats
+																																										# time_start
+																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+			# update db (tree_data.dat for each dir)
+																																										# time_end2^@trees.each &:save
+																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
+			# *now, when we have all tfiles — process @not_finished.files_queue
+			if @not_finished.files_queue_index.not.empty?
+																																										w("=== finish not_finished files_queue (#{@not_finished.files_queue_index.length}) ===")
+				# find files in trees by path from the files_queue_index
+				@not_finished.files_queue = []
+				for path in @not_finished.files_queue_index.keys
+					dir_path = File.dirname path
+					fn = File.basename path
+					for tree in @trees.values
+						if tdir=tree.tdir_by_path[dir_path]
+							if tfile=tdir.tfile_by_name[fn]
+								@not_finished.files_queue << tfile
+							end
+						end
+					end
+				end
+				# make_packs! for files in files_queue
+				if @not_finished.files_queue.not.empty?
+																																										w(%Q{@not_finished.files_queue.n=}+@not_finished.files_queue.n.inspect)
+					all_zips_ready = make_packs! @not_finished.files_queue
+					((( all_zips_ready.and.wait )))
+				end
+			end
 
-			make_packs!
+
+			#. this save should be as close as possible to make_packs! where we do @not_finished.files_queue save
+			@trees.values.each &:save
+
+			# *** work with the main list of detected changed files ***
+			all_zips_ready = make_packs! @files
 
 
+			# whait when all zip files are ready and base.dat updated (all_zips_ready can be nil if no files to process)
+			if all_zips_ready
+				((( all_zips_ready.wait )))
+			else
+				# update data_by_file_key.dat (2/2)
+				# *needed here to save changes if there were only deleted items and no new packs created
+				Chunks.save
+				# update last_up_at
+				@db.base.tap do |_|
+					_.last_up_at = at
+					_.save
+				end
+				# *if all files skipped due to deduplication — @not_finished.files_queue is changed but not saved
+				@not_finished.save
+			end
+			 																																								w("wait for all packs threads")
+			# *we have to wait for all uploads to have updated storages.dat
+			((( @uploading_threads.each &:join )))
+
+			# balance storage array if needed
+			# *should be after base.save and before packing #set_db.7z
+			begin
+				# (storage array) if over_used_space — move some files to other storages
+				h_storage.balance_if_needed
+				h_storage.save_db   # storages.dat (3/3)
+			rescue
+				puts "! ! ! balance_if_needed failed: #$!"
+			end
+
+			# upload base.dat separately to the root (needed for detecting full fast_one storage for down)
+			base_uploading_thread = Thread.new do
+				base_uploading_line = C_plines.add_shared_line ' > > >  base.dat: '
+				base_file = IFile.new @db.dir/'base.dat'
+				h_storage.for_each(base_uploading_line) {|_| _.add_update base_file, base_uploading_line }
+			end
+			#-- upload #set_db.7z
+			# archive db (#set_db.7z)
+			db_uploading_line = C_plines.add_shared_line " > > >  #{@db_fn}: "
+			db_file = @tmp_dir/@db_fn
+			ZipCls.new(fp:db_file).pack_dir @db.dir, skip_by_path: ['not_finished.dat']
+			# … and move to destination
+			h_storage.for_each(db_uploading_line) {|_| _.add_update db_file, db_uploading_line }
+
+			# *we should wait for uploadings before tmp_dir deletion
+			((( base_uploading_thread.join )))
+
+			@tmp_dir.del!
+																																											# time_end2^update and backup db
+																																											ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+																																											w("(update and backup db) processed in #{'%.3f' % ttime}")
 			#-- list skipped files
 			@tree.state.skipped = skipped   # used in tests for checks
 			skipped_due_to_path_limit = skipped.select {|_| _.d.error.is_a? WinPathLimitError }
@@ -466,36 +576,34 @@ class Sync
 
 			# skipped items due to Windows MAX_PATH limit
 			list_MAX_PATH_skipped_files_and_show_a_solution_hint skipped_due_to_path_limit
-
 			#-- /list skipped files
 
-
-			@status.f_done = true
+		rescue TestTriggerError
+			# stop all uploadings (emulate termination)
+			@uploading_threads.each &:kill
+																																										w("stop all uploadings")
+			raise
 		end
 																																										#* for profiler to have only 1 thread
-
 		wait_for_results
 		@f_set_first_run = false
 	end
 																																							#~ up/
 	def wait_for_results
-		# wait for status update from the thread
-		loop do
-			sleep 0.2
-			if @status.f_done
-				break
-			end
-			if @hardlinks_map_missed[0]
-				@hub.fire :hardlink_map_missed, @hardlinks_map_missed
-			end
-			if @links_broken[0]
-				@hub.fire :broken_links, @links_broken
-			end
-			# abort on exception iside the thread
-			if !@my_thread.alive?
-				exit 1
+		# monitor special vars to fire events
+		Thread.new do
+			loop do
+				sleep 0.2
+				if @hardlinks_map_missed[0]
+					@hub.fire :hardlink_map_missed, @hardlinks_map_missed
+				end
+				if @links_broken[0]
+					@hub.fire :broken_links, @links_broken
+				end
 			end
 		end
+
+		@my_thread.join
 	end
 
 	# -down
@@ -806,7 +914,11 @@ class Sync
 																																							#~ down
 			# retry failed dir symlink creations
 			for res in dir_symlinks_failed
-				res.retry.()
+				begin
+					res.retry.()
+				rescue FS::KnownError
+					puts $!
+				end
 			end
 			# process local tree — delete not marked nodes
 			# 08.08.21: do not delete not marked nodes, delete only nodes that have .deleted in up_db
@@ -888,9 +1000,9 @@ class Sync
 					task_title = "#{pack_index})"
 
 					storage = h_storage.fast_one
-					arr_storage_part = storage.is_a?(StorageArray) ? (" %-14s" % "[#{storage.storage_by(fname).key}]") : ''
+					arr_storage_part = storage.is_a?(StorageArray) ? (" %-16s" % "[#{storage.storage_by(fname).key}]") : ''
 																																										#-#!!_ w^get: =task_title =fname=arr_storage_part ...
-																																										pack_line = C_plines.add_shared_line " <<< %-32s#{arr_storage_part} ..." % ["#{task_title} #{fname}"]
+																																										pack_line = C_plines.add_shared_line " <<< %-35s#{arr_storage_part} ..." % ["#{task_title} #{fname}"]
 
 					# download
 					# *we do not use tmp files if reading from LocalFS
@@ -1006,55 +1118,85 @@ class Sync
 		tree
 	end
 
-	def make_packs!
+	# << all_zips_ready | nil (if no files to zip)
+	def make_packs!(files)
+																																							#~ make_packs!\
 																																										w("-- make_packs! -- (#{Time.now.strftime('%d.%m - %H:%M')})")
 		 																																								# time_start
 		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 		@tmp_dir.create
 		pack_id = @db.base.last_pack_id || 0
-		if @files.empty?
+		tx_mutex = Mutex.new
+		all_zips_ready = nil
+		if files.empty?
 			w '(make_packs!) no files to add - skip pack creation, backup only db'
 		else
-			uploading_threads = []
 			limit = @conf.pack_max_size_bytes
 			diff_size_ok = (limit * 0.05).to_i
 			target_pack_size = limit + diff_size_ok
-			zip = last_min_size_diff = f_one_big_file = nil
+			# `zip, last_min_size_diff, f_one_big_file, pack_skipped_n´ = nil
+			zip = nil
+			last_min_size_diff = nil
+			f_one_big_file = nil
+			pack_skipped_n = nil
 
 			reset_pack = -> do
 				zip = ZipCls.new
 				last_min_size_diff = target_pack_size
 				f_one_big_file = false
+				pack_skipped_n = 0
 			end
 			reset_pack.()
-
-			files_queue = @files.sort_by &:mtime   # (old -> new)
-			# *needed for stable tests
-			files_queue.sort_by! {|_| [_.mtime, _.size] } if DirDB.dev?
+																																							#~ make_packs!
+			files_queue = files.sort_by &:mtime   # (old -> new)
+			#. *needed for stable tests
+			files_queue.sort_by! {|_| [_.mtime, _.size] } if TESTS
+			@not_finished.files_queue = files_queue.dup
+			@not_finished.save
 			removed_files = []
 			removed_files_total_compressed_size = 0
 			f_force_add = false
 			skipped_n = 0
 			skipped_total_size = 0
+			creating_zips_n = 0
+			f_all_files_processed = false
 			while file=files_queue.shift
-				# skip if file is already in some pack
+				# if file is already in some pack — skip
 				if file.chunk
-					# skip
+					pack_skipped_n += 1
 					skipped_n += 1
 					skipped_total_size += file.size
+					@not_finished.files_queue.pull file
+				# (<!) if file is too big — skip (should help to skip big files if we are close to the target pack size)
+				elsif zip.files.n > 0 && file.size > last_min_size_diff * 2
+					removed_files << file
+					removed_files_total_compressed_size += file.size
+
 				else
-					# *use file_key instead of name to avoid collisions
-					#  do not add ext because files with different ext may have same content
-					file_compressed_size = zip.add file, as:file.key
+					# (LONG) add file to zip
+					file_compressed_size = nil
+					Ticker[title:"zip.add #{file.size.hr} #{file.ext} took"] do
+						# *use file.key instead of name to avoid collisions
+						#  do not add ext because files with different ext may have same content
+						file_compressed_size = zip.add file, as:file.key
+						# TestTrigger^(up) zip.add file delay
+						if TESTS
+							TestTriggers['(up) zip.add file delay']&.()
+						end
+					end
 					# mark that a file is now in some pack, so same files will be skipped
+					# *chunk info will be updated later when we have the pack name (chunk.update)
 					file.create_chunk
 				end
 				unless f_force_add
 					size_diff = (target_pack_size - zip.size).abs
 					if size_diff > last_min_size_diff || zip.size > target_pack_size
+																																										w("    oversize: #{zip.size.hr} > #{target_pack_size.hr}  (diff: #{size_diff.hr})")
 						if zip.files.n == 1
 							f_one_big_file = true
+																																										w("    f_one_big_file")
 						else
+																																										w("    rem_last (#{file_compressed_size.hr})")
 							zip.rem_last
 							file.delete_chunk
 							removed_files << file
@@ -1066,23 +1208,28 @@ class Sync
 					end
 				end
 																																							#~ make_packs!
-				# (<) if not many files remained — add to the last pack
+				# (<) if not many removed files remained — add to the last pack
 				if files_queue.empty? && removed_files.not.empty? && removed_files_total_compressed_size < target_pack_size/2
+																																										w("    not many removed files remained (#{removed_files.n}) — add to the last pack")
 					# re-add removed files
 					files_queue.unshift *removed_files
 					removed_files.clear
 					removed_files_total_compressed_size = 0
 					f_force_add = true
-					# * continue to process files_queue
+					# *continue to process files_queue
 					next
 				end
 
 				# finish this pack
 				if f_one_big_file || size_diff < diff_size_ok || files_queue.empty?
+																																										w("finish this pack")
+																																										w(%Q{zip.files.n=}+zip.files.n.inspect)
 					if zip.files.not.empty?
+						all_zips_ready ||= WaitPoint.new 'all_zips_ready'
 						total_files_size = zip.files.sum &:size
 						pack_id += 1
-						# ID_dateFrom-dateTo
+																																										w(" - - - finishing pack: #{pack_id..}.")
+						# ID_dateFrom_dateTo
 						# ID_dateFrom (if dateTo is the same)
 						pack_name = pack_id.to_s
 						last_date_part = nil
@@ -1094,92 +1241,106 @@ class Sync
 						end
 						pack_fn = pack_name+'.7z'
 						pack_file = @tmp_dir/pack_fn
-						uploading_threads << Thread.new(zip, pack_name, pack_file) do |zip, pack_name, pack_file|
-							uploaing_line = C_plines.add_shared_line " > > >  #{pack_file.name}"
-							# archive
-							zip.save_as pack_file
-							uploaing_line << " (#{pack_file.size.hr}): "
+						# parent is @my_thread
+						@uploading_threads << Thread.new(zip, pack_name, pack_file, pack_id) do |zip, pack_name, pack_file, pack_id|
+							#. *needed to break processing of files_queue (not_finished files_queue will be not empty)
+							uploading_line = C_plines.add_shared_line "(in thr) > > >  #{pack_file.name}"
+							creating_zips_n += 1
+
+							# (LONG) compress again (if not cached) and save archive (.7z file in the tmp dir)
+							Ticker[title:"zip.save_as #{zip.size.hr} took", shared_line:uploading_line] do
+								# *clears :zip_data, :as from files data
+								zip.save_as pack_file
+							end
+							uploading_line << " (#{pack_file.size.hr}): "
+							# TestTrigger^(up) uploading thread delay, pack_id
+							if TESTS
+								TestTriggers['(up) uploading thread delay']&.(pack_id)
+							end
 																																										#-#!!_ w^ > > >  =pack_file.name (=pack_file.size.hr)
-							# update files chunks (should be after .save_as)
+							# update @not_finished.files_queue and files chunks (should be after .save_as)
 							zip.files.each do |_|
+								@not_finished.files_queue.pull _
 								_.chunk.update(
 									pack_name:pack_name
 								)
 							end
 
-							# move archive to remote dir
-							h_storage.for_each(uploaing_line) {|_| _.add_update pack_file, uploaing_line }
+							# *ensure consistent state
+							@db.transaction_start [:data_by_file_key, :base, :not_finished], tx_mutex do
+								# update data_by_file_key.dat (1/2)
+								Chunks.save
+								# update last_pack_id in base.dat only when a zip file is saved
+								@db.base.tap do |_|
+									# *it is possible that some older pack zip saved later than the last one and here we ensure that we will not overwrite the last_pack_id (grater number)
+									if !_.last_pack_id || _.last_pack_id < pack_id
+										_.last_up_at = at
+										_.last_pack_id = pack_id
+										_.save
+									end
+								end
+
+								# move archive to remote dir on all storages (in parallel) - (1/2)
+								@not_finished.uploadings << pack_file.name
+								@not_finished.save
+							end
+
+							# all_zips_ready done?
+							creating_zips_n -= 1
+							if creating_zips_n == 0 && f_all_files_processed
+								all_zips_ready.done!
+							end
+
+							# TestTrigger fail^(up) exit after move archive to remote dir, pack_id
+							if TESTS
+								raise TestTriggerError if TestTriggers['(up) exit after move archive to remote dir']&.(pack_id)
+							end
+							h_storage.for_each(uploading_line) {|_| _.add_update pack_file, uploading_line }
+
+							# -- file copied/uploaded to all storages --
+
+							@not_finished.uploadings.pull pack_file.name
+							@not_finished.save
+							# *files_map and storage stats are updated only after upload
+							h_storage.save_db   # storages.dat (2/3)
 
 							pack_file.del!
+
+						rescue TestTriggerError
+							# *this will stop @my_thread and all @uploading_threads
+							@my_thread.raise $!
 						end
 					end
 
 					f_last_file = files_queue.empty? && removed_files.empty?
-					unless f_last_file
+																																										w(%Q{files_queue.n=}+files_queue.n.inspect)
 																																										w(%Q{removed_files.n=}+removed_files.n.inspect)
+																																										w(%Q{pack_skipped_n=}+pack_skipped_n.inspect)
+					unless f_last_file
 						# re-add removed files
 						files_queue.unshift *removed_files
 						removed_files.clear
 						removed_files_total_compressed_size = 0
 						# start new pack
 						reset_pack.()
-					end
-				end
-			end
 						# * continue to process files_queue
-																																							#~ make_packs!
-			# *we should wait for all packs threads to finish (there is chunk.update and zip_data removed from files data)
-			uploading_threads.each &:join
-																																										# w^Skipped files: =skipped_n (=skipped_total_size.hr) -- deduplication
-																																										w("Skipped files: #{skipped_n} (#{skipped_total_size.hr}) -- deduplication")
+					end
+																																										w(" - - - finished pack: #{pack_id}/")
+				end
+				# ^(while) take the next file from files_queue
+			end
+
+			# while/
+			f_all_files_processed = true
+			 																																							# w^Skipped files: =skipped_n (=skipped_total_size.hr) -- deduplication
+			 																																							w("Skipped files: #{skipped_n} (#{skipped_total_size.hr}) -- deduplication")
+		end	# if/
 																																										# time_end2^make_packs!
 																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 																																										w("(make_packs!) processed in #{'%.3f' % ttime}")
-		end
-		 																																								# time_start
-		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		# update db (tree_data.dat for each dir) when all the packs done
-		@trees.values.each &:save
-																																										# time_end2^@trees.each &:save
-																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
-		# data_by_file_key.dat
-		Chunks.save
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-		@db.base.tap do |_|
-			_.last_up_at = at
-			_.last_pack_id = pack_id
-			_.save
-		end
-
-		# *should be after base.save and before packing #set_db.7z
-		begin
-			h_storage.balance_if_needed
-			h_storage.save_db   # storages.dat
-		rescue
-			puts "! ! ! balance_if_needed failed: #$!"
-		end
-
-		# add base.dat separately (needed for detecting full fast_one storage for down)
-		base_uploaing_line = C_plines.add_shared_line ' > > >  base.dat: '
-		base_uploading_thread = Thread.new do
-			base_file = IFile.new @db.dir/'base.dat'
-			h_storage.for_each(base_uploaing_line) {|_| _.add_update base_file, base_uploaing_line }
-		end
-		# archive db
-		db_uploaing_line = C_plines.add_shared_line " > > >  #{@db_fn}: "
-		db_file = @tmp_dir/@db_fn
-		ZipCls.new(fp:db_file).pack_dir @db.dir
-		# … and move to destination
-		h_storage.for_each(db_uploaing_line) {|_| _.add_update db_file, db_uploaing_line }
-		# *we should wait for this thread before tmp_dir deletion
-		base_uploading_thread.join
-
-		@tmp_dir.del!
-		 																																								# time_end2^update and backup db
-		 																																								ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-		 																																								w("(update and backup db) processed in #{'%.3f' % ttime}")
+		all_zips_ready
 	end
 																																							#~ make_packs!/
 	def get_branch_dirs(dir)
@@ -1267,13 +1428,38 @@ end
 																																							#~ Sync/
 
 
+# -not finished
+class NotFinished
+	attr_accessor :files_queue, :uploadings
+	def initialize(db:nil)
+		@_db = db
+		@db = db.not_finished
+		@db.files_queue ||= []
+		@uploadings = @db.uploadings ||= []
+	end
+	def files_queue_index
+		# index by path
+		@files_queue_index ||= @db.files_queue.create_index
+	end
+	def save
+		if @files_queue
+			# *convert TreeFiles to list of paths
+			@db.files_queue = @files_queue.map &:path
+		end
+		@db.save
+	end
+end
+
+
+
 # -tree
+# when a tree is created we update state of files/dirs comparing to the state in db
 class Tree
 	include Helpers
 	@@id = 0
 																																							#~ Tree\
 	# *@db — dir db
-	attr :sync, :hub, :db, :root_dir, :dirs, :state, :stats, :tdir_by_path, :all_dirs, :filter
+	attr :sync, :hub, :db, :root_dir, :state, :stats, :tdir_by_path, :all_dirs, :filter
 	def initialize(sync:nil, key:nil, db:nil, root_dir:nil, dirs:nil)
 		@sync = sync
 		@key = key
@@ -1313,8 +1499,12 @@ class Tree
 		}
 		@hub = Hub.new
 		%w[added changed removed link_added link_broken hardlink_map_missed excluded skipped].each do |action|
-			@hub.on :"file_#{action}", :"dir_#{action}" do |e, node_path, node|
-				@state[action.to_sym] << node_path
+			# *mostly events are fired with self (node)
+			# but there are
+			#		@hub.fire :file_excluded, @path, self
+			#		@hub.fire :dir_excluded, @path, self
+			@hub.on :"file_#{action}", :"dir_#{action}" do |e, node_or_path, node|
+				@state[action.to_sym] << node_or_path
 				@stats[e] += 1
 				if e == :dir_excluded && @state[:added].includes?(node)
 					@state[:added].delete node
@@ -1381,7 +1571,7 @@ class Tree
 		@db.reject! {|k, v| v.excluded }
 
 		#. *sorting needed for tests to compare results (after adding processing in threads)
-		@db.replace @db.sort.to_h if DirDB.dev?
+		@db.replace @db.sort.to_h if TESTS
 		@db.save
 		@filter.save
 	end
@@ -1406,7 +1596,7 @@ class Tree::Dir < IDir
 		end
 	end
 
-	attr :path, :tree, :d, :dirs, :tfiles, :filter, :parent_tdir
+	attr :path, :tree, :d, :dirs, :tfiles, :filter, :parent_tdir, :tfile_by_name
 	def initialize(dir_path, base:nil, parent_tdir:nil)
 		@parent_tdir = parent_tdir
 		super dir_path, base:base.abs_path
@@ -1666,7 +1856,7 @@ class Tree::File < IFile
 				}.tap do |_|
 					_.as_file = 1 if hardlink? && as_file?
 					@hub.fire :file_added, self
-																																									w("file added - #{self.inspect}")
+																																									w("file added (1) - #{self.inspect}")
 				end
 			end
 		rescue MissedLinkError
@@ -1684,7 +1874,7 @@ class Tree::File < IFile
 				# *do not add to db at all
 				@tdir.d.files.delete name
 			elsif !@d.excluded
-				@hub.fire :file_excluded, @path
+				@hub.fire :file_excluded, @path, self
 																																										w("file excluded - #{self.inspect}")
 				@d.excluded = {at:at}
 				# update chunks
@@ -1785,7 +1975,7 @@ class Tree::File < IFile
 						# convert to normal file
 						@d.replace(mtime: mtime.to_i, versions: [key])
 						@hub.fire :file_added, self
-																																									w("file added - #{self.inspect}")
+																																									w("file added (2) - #{self.inspect}")
 					elsif @resolved.restore
 						#- do not change mtime for^dir
 						was_mtime = dir.mtime
@@ -1894,8 +2084,7 @@ end
 																																							#~ Tree::File/
 
 
-
-
+# -chunk
 class Chunk
 	::Chunks = self
 	include Helpers
@@ -1926,7 +2115,7 @@ class Chunk
 		# data_by_file_key.dat
 		def save
 			#. *sorting needed for tests to compare results (after adding processing in threads)
-			@@db.replace @@db.sort.to_h if DirDB.dev?
+			@@db.replace @@db.sort.to_h if TESTS
 			@@db.save
 		end
 	end
@@ -1945,13 +2134,13 @@ class Chunk
 		@files << path
 		@d.files = @files.to_a
 		#. *sorting needed for tests to compare results (after adding processing in threads)
-		@d.files.sort! if DirDB.dev?
+		@d.files.sort! if TESTS
 		@d.delete :empty_since
 	end
 	def unbind_file(path)
 		@files.delete path
 		@d.files = @files.to_a
-		@d.files.sort! if DirDB.dev?
+		@d.files.sort! if TESTS
 		if @d.files.empty?
 			@d.empty_since = {at:at}
 		end
@@ -2364,7 +2553,7 @@ class StorageHelper
 					? (StorageArray.new(key:key, set:@sync.set, db:o))
 					: (Storage[key].new **o.merge(key:key, set:@sync.set, in_storage_dir:@in_storage_dir))
 			end
-			raise NoDefinedStoragesError, '(=@context - storages) there are no defined storages' if map.empty?
+			raise NoDefinedStoragesError, "(#{@context} - storages) there are no defined storages" if map.empty?
 																																										w("(#{@context}) using storages: #{map.keys} (#{map.length}/#{@db.length})")
 			rejected_storages = @db.keys - map.keys
 			if rejected_storages[0]
@@ -2459,6 +2648,7 @@ class StorageHelper
 						# download base.dat as tmp file
 						file = tmp_dir/"test_#{key}.tmp"
 						some_storage.get 'base.dat', to:file
+						#. file content looks like: {:last_up_at=>1664298309}
 						some_storage.base_data = eval(file.read) rescue {}
 						some_storage.base_data.n = n += 1
 						file.del!
@@ -2477,7 +2667,7 @@ class StorageHelper
 				puts "! ! ! (#{@context} - fast_one) Timeout error, n: #{n}"
 			end
 
-			raise KnownError, '(=@context - fast_one) error: all storages skipped (base.dat missed)' if n == 0
+			raise KnownError, "(#{@context} - fast_one) error: all storages skipped (base.dat missed)" if n == 0
 			# get the fastest of storages with the latest data
 			# *we do not compare .last_pack_id because only folders could be created/deleted and new pack is not created in such case
 			#   also for global db there is no last_pack_id
@@ -2519,7 +2709,6 @@ end
 																																							#~ StorageHelper/
 
 
-Shared = {}
 
 # Error^KnownError < StandardError
 class KnownError < StandardError;end
@@ -2529,6 +2718,8 @@ class KnownError < StandardError;end
 	class NoDefinedStoragesError < KnownError;end
 	# Error^WinPathLimitError < KnownError
 	class WinPathLimitError < KnownError;end
+	# Error^TestTriggerError < KnownError
+	class TestTriggerError < KnownError;end
 
 
 

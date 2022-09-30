@@ -1,10 +1,10 @@
 # !!! should be inherited from DirDB.rb
-# should be used in prject with Hash_dot_notation
-# @db ?= DirDB.new(dir:$app_dir).tap  .load
+# @db ?= DirDB.new(dir:$app_dir)
 # @db = DirDB.new '.db_folder' — default .db
 # @db.load — will load all files
 # @db = DirDB.new('db_global').load 'storage_GoogleDrive' — load only one file
 # @last_themes = @db.last_themes.names ||= []
+# @db.node_data_by_path.default_proc ?= proc {|h, k| h[k]={} } — we have to use this, because ?= {{}} is ignored for existing hash
 # @db.test[:now] = Time.now.to_i
 # @db.last_themes_A — this will be an array
 # @db.test.save — save this collection
@@ -14,6 +14,22 @@
 #   sync_db.add_save!(@db, 'storages')
 #   @db.save
 # frozen_string_literal: true
+#
+# transaction of db: save only all listed cols together or none
+# db.transaction_start [:data1, :data2], tx_mutex do
+#		[prepare changes]
+# end
+#
+# tx = db.transaction_start [:data1, :data2]
+# db.data1.save
+#  - process that can be interrupted -
+# db.data2.save
+# tx.finish — at this moment saved colname_.dat files will replace original .dat files
+# test can be found by '# -transaction test' in _tests.rb
+
+require '_base/Core'
+require '_base/Array'
+require '_base/FS'
 
 class DirDB
 
@@ -39,6 +55,9 @@ class DirDB
 		@bin = bin.create_index
 		@ext = '.dat'
 		@data_by_name = {}
+		@mutex_by_name = {}
+		@active_transactions = []
+		@tx_by_name = {}
 		self.load if load
 	end
 
@@ -86,6 +105,10 @@ class DirDB
 				obj
 			end
 		end
+	end
+	# allow to get data by @db[name_var]
+	def [](name)
+		send name
 	end
 
 	def load(only_name=nil)
@@ -141,6 +164,40 @@ class DirDB
 		end
 	end
 
+	# *each col can be only in one tx at a time
+	# *mutex needed to use same tx in parallel threads
+	# << tx — to be able to do tx.finish
+	def transaction_start(col_names, tx_mutex=nil)
+		#. names to_s
+		col_names.map! {|_| _.to_s }
+
+		tx_mutex&.lock
+		for name in col_names
+			raise "(DirDB - transaction_start) '#{name}' collection is already in some active transaction" if @tx_by_name[name]
+		end
+		Transaction.new(self).tap do |tx|
+			@active_transactions << tx
+			for name in col_names
+				@tx_by_name[name] = tx
+			end
+			tx.on_finish do
+				@tx_by_name.delete_keys! col_names
+				@active_transactions.pull tx
+				tx_mutex&.unlock
+			end
+			if block_given?
+				yield
+				tx.finish
+			end
+		end
+	end
+
+	# << tx — to use tx.add_fn
+	def in_transaction?(name)
+		@tx_by_name[name]
+	end
+
+
 	def save(only:nil)
 		# (<!)
 		if @f_buffer_saves
@@ -156,43 +213,77 @@ class DirDB
 			to_save.select! {|k, v| k == only } if only
 
 			for name, data in to_save
-				check_data! data if DirDB.dev?
-				# save tmp file to do not corrupt original in case of an error
-				tmp_file = dir/(name+'_'+@ext)
-				tmp_file.open 'wb' do |f|
-					#			load				save				size
-					# dev	0.366-0.385	2.085-2.116	1673K
-					# prod	0.332-0.351	0.116-0.124	1576K
-					#! ще можна спробувати різні джеми для JSON
-					if DirDB.dev?
-						# *saves with LF on Win
-						require 'pp'
-						PP.pp data, f, 150
-					else
-						if @bin[name]
-							# {}.replace is a workaround for the error  singleton can't be dumped (TypeError)
-							#  caused by changes for the hash in .add_save!
-							Marshal.dump({}.replace(data), f)
+				check_data! name, data if DirDB.dev?
+				mutex = @mutex_by_name[name] ||= Mutex.new
+				mutex.synchronize do
+
+					# save tmp file to do not corrupt original in case of an error
+					tmp_file = dir/(name+'__tmp'+@ext)
+					tmp_file.open 'wb' do |f|
+						#			load				save				size
+						# dev	0.366-0.385	2.085-2.116	1673K
+						# prod	0.332-0.351	0.116-0.124	1576K
+						#! ще можна спробувати різні джеми для JSON
+						if DirDB.dev?
+							# *saves with LF on Win
+							require 'pp'
+							PP.pp data, f, 150
 						else
-							# *saves with CRLF on Win
-							f.write data.inspect
+							if @bin[name]
+								# {}.replace is a workaround for the error  singleton can't be dumped (TypeError)
+								#  caused by changes for the hash in .add_save!
+								Marshal.dump({}.replace(data), f)
+							else
+								# *saves with CRLF on Win
+								f.write data.inspect
+							end
 						end
 					end
+					# replace the original if all is ok
+					replace_ori = -> do
+						tmp_file.move_to dir/(name+@ext)
+					end
+
+					if tx=(in_transaction? name)
+						tx.add_fn name, replace_ori
+					else
+						replace_ori.()
+					end
+
 				end
-				# replace the original if all is ok
-				tmp_file.move_to dir/(name+@ext)
 			end
 		end
 	end
 
 	# (>>>)
 	# *used only if DirDB.dev?
-	def check_data!(data)
+	def check_data!(name, data)
 		case data
 			when String, Numeric, Bool, Regexp then :ok
-			when Array then data.each {|el| check_data! el }
-			when Hash then data.each {|k, v| check_data! v }
-			else raise "(DirDB - save) error: bad data type - #{data.class} = #{data}"
+			when Array then data.each {|el| check_data! name, el }
+			when Hash then data.each {|k, v| check_data! k, v }
+			else raise "(DirDB - save) error: bad data type for '#{name}': #{data.inspect} (#{data.class})"
+		end
+	end
+
+
+
+	# -Transaction -tx
+	class Transaction
+		def initialize(db)
+			@db = db
+			@fn_by_name = {}
+		end
+		def add_fn(name, fn)
+			# *will replace old fn if defined
+			@fn_by_name[name] = fn
+		end
+		def on_finish(&block)
+			@on_finish = block
+		end
+		def finish
+			@fn_by_name.values.each &:call
+			@on_finish&.()
 		end
 	end
 

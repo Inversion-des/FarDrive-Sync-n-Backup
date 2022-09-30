@@ -4,6 +4,7 @@ class Array
 	alias :includes? include?
 	alias :divide_by partition
 	alias :n size
+	alias :pull delete
 
 	# -includes any
 	# record.keys.includes_any? system_params
@@ -35,11 +36,10 @@ class Array
 	# -index
 	# Creates hash with keys from values of array
 	#  arr = ['k1', 'k2', 'k1']
-	#  arr.create_index   #=> {"k1"=>1, "k2"=>1}
+	#  arr.create_index   #=> {'k1'=>1, 'k2'=>1}
 	def create_index
-		Hash[ self.map {|k| [k, 1] } ]
+		self.to_h {|_| [_, 1] }
 	end
-
 
 	# -- for arr of hashes
 

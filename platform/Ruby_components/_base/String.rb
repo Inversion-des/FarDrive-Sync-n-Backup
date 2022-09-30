@@ -1,6 +1,11 @@
 class String
 	alias :includes? include?
 
+	# '' | 'not found' => 'not found'
+	def |(oth)
+		self.strip.empty? ? oth : self
+	end
+
 	# -first -upper case -case -upcase
 	def upcase_first
 		return self if empty?
