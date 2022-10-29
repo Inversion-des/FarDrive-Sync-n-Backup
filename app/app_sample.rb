@@ -234,7 +234,40 @@ class App
 		 																																										w("--- Total time: #{'%.3f' % ttime} (#{'%.1f' % (ttime.to_f / 60)} min) ---")
 	end
 	def init
+		$stderr = $>   # single buffered output (instead of 2>&1)
+
+		#-- run only one instance
+		working_file = IFile['_working.txt']
+		d = working_file.load rescue {}
+		# (<!) if working
+		if d.since
+			moment = d.since.to_time
+			running_hrs_part = "running #{moment.say_passed}"
+			# if too logn — continue this run
+			limit_hrs = 2
+			if moment < limit_hrs.hours.ago
+				w " (!) existing #{working_file.name} ignored (#{running_hrs_part} > #{limit_hrs} hrs)"
+			else # — skip this run (inc counter)
+				# inc^d.skipped_runs
+				d.skipped_runs ||= 0
+				d.skipped_runs += 1
+				w " (!) #{working_file.name} exists (#{running_hrs_part}) -- skipping this run (#{d.skipped_runs} total skipped)"
+				working_file.save d
+				exit
+			end
+		end
+		# create a special file
+		d.since = Time.now.to_i
+		d.since_hr = Time.now.to_s
+		working_file.save d
+		# remove the file on finish
+		at_exit do
+			working_file.del!
+		end
+
 		DirDB.prod!
+
+		# log setup
 		if :realtime_log
 			$>.sync = true  # *may be slower processing
 		else
@@ -245,11 +278,11 @@ class App
 				end
 			end
 		end
-		$stderr = $>   # single buffered output (instead of 2>&1)
-		puts
+
+		# date and versions line
 		ver_file = 'build.txt'
 		ver = File.read(ver_file) rescue "[#{ver_file} missed]"
-		puts '=== ' + Time.now.to_s + " ( v#{ver} / Ruby v#{RUBY_VERSION} ) " + '='*45  # date & ver marker
+		nputs '=== ' + Time.now.to_s + " ( v#{ver} / Ruby v#{RUBY_VERSION} ) " + '='*45
 
 		# run with 'below normal' CPU piority
 		require 'win32/process'

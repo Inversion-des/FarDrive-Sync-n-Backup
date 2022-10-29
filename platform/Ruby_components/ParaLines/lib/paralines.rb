@@ -59,37 +59,39 @@ class ParaLines
 	# part = shared_line.part_open "#{n}… " + later: part.close '+'
 	# *can output partial progress by adding dots: [LS   ] [cloud2…   ] --> [LS....] [cloud2…   ] — call .close('.' * done_count) multiple times with increasing number of dots
 	# *this line can be used by many threads
+	# << helper obj (shared line) with the <<, .part_open and .start_progress_bar methods
 	def add_shared_line(text='')
 		key = text.object_id
 		output key, text
-		# < helper obj with the << and .part_open methods
-		Object.new.tap do |o|
-			rel = self
+		# << helper obj (shared line)
+		Object.new.tap do |shared_line|
+			rel_plines = self
 			line_by_key = @line_by_key
 			f_to_console = @f_to_console
 
-			o.define_singleton_method :<< do |text|
-				rel.send :output, key, text
+			shared_line.define_singleton_method :<< do |text|
+				rel_plines.send :output, key, text
 			end
 
-			o.define_singleton_method :part_open do |text_='…'|
-				d = line_by_key[key]
+			shared_line.define_singleton_method :part_open do |text_='…'|
 				part_col = nil
+				d = nil
 
 				MUTEX.synchronize do
+					d = line_by_key[key]   # should be inside mutex
 					# *we replace placeholder chars like: … or _ or just the last char (order here needed for priority to be able to have _ in text and use … as a placeholder)
 					part_col = d[:col] + (text_.index('…'.freeze) || text_.index('_'.freeze) || text_.length-1)
 
-					rel.send :output, key, text_
+					rel_plines.send :output, key, text_
 				end
 
-				# < helper obj with the .close method
-				Object.new.tap do |o|
-					o.define_singleton_method :close do |end_text|
+				# << helper obj (part) with the .update/.close method
+				Object.new.tap do |part|
+					part.define_singleton_method :close do |end_text|
 						# *print the closing chars in the saved position
 						MUTEX.synchronize do
 							if f_to_console
-								rel.send :print_in_line,
+								rel_plines.send :print_in_line,
 									lines_up: line_by_key.count - d[:line],
 									col: part_col,
 									text: end_text
@@ -98,17 +100,26 @@ class ParaLines
 							end
 						end
 					end
-					class << o
+					class << part
 						alias :update close
 					end
 				end
 			end
+			shared_line.define_singleton_method :start_progress_bar do |title, **o|
+				ProgressBar.new title, **o.update(shared_line:shared_line)
+			end
 		end
+	end
+
+	# << helper obj (ParaLines) with the .update(done:5)/.update(done_index:4) methods
+	def start_progress_bar(p, **o)
+		ProgressBar.new p, **o.update(plines:self)
 	end
 
 	def ask(text)
 		text += ': '
 		key = text.object_id
+		d = nil
 		MUTEX.synchronize do
 			d = @line_by_key[key]
 			if @f_to_console
@@ -116,23 +127,25 @@ class ParaLines
 			else  # for file
 				d[:text] += text.to_s
 			end
-			answer = ((( $stdin.gets ))).chomp
-			d[:text] += answer
-			yield answer if block_given?
 		end
+		answer = ((( $stdin.gets ))).chomp
+		d[:text] += answer
+		yield answer if block_given?
 	end
 
 	# plines.flush final:true
 	# *needed only when @f_to_file
 	# *can be called manually if the block form was not used and all the threads are finished
 	def flush(final:false)
-		if @f_to_file
-			# *rewind need for periodical bg flush
-			@initial_pos ||= STDOUT.pos
-			STDOUT.pos = @initial_pos
-			puts @line_by_key.map {|key, d| d[:text] }
+		MUTEX.synchronize do
+			if @f_to_file
+				# *rewind needed for periodical bg flush
+				@initial_pos ||= STDOUT.pos
+				STDOUT.pos = @initial_pos
+				puts @line_by_key.map {|key, d| d[:text] }
+			end
+			@line_by_key.clear if final
 		end
-		@line_by_key.clear if final
 	end
 
 
@@ -190,8 +203,8 @@ class ParaLines
 			\e[u
 		OUT
 	end
-	
-	
+
+
 	# *this allows to change STDOUT like this:
 	#   ParaLines::STDOUT = C_w_file
 	private \
@@ -226,7 +239,7 @@ class ParaLines::WaitPoint
 	end
 	def wait
 		# using defaults: delay:3, int:1
-		Ticker[title:"WaitPoint #{@name} took"] do
+		Ticker["WaitPoint #{@name} took"] do
 			((( @q.pop )))
 		end
 	end
@@ -237,15 +250,15 @@ end
 
 
 
+#! can be created via method of shared_line / plines (as ProgressBar)
 class ParaLines::Ticker
 	def self.[](...)
 		self.new(...)
 	end
-	
-	def initialize(delay:3, int:1, title:'working', plines:C_plines, shared_line:nil)
+
+	def initialize(title='working', delay:3, int:1, plines:C_plines, shared_line:nil, tpl_start:nil, tpl_end:nil)
 		@start = moment
 		gap = shared_line ? ' ' : ''   # gap needed only if the shared_line passed
-		shared_line = nil
 		f_initial_print_done = false
 		took_part = nil
 		thr = Thread.new do
@@ -254,33 +267,78 @@ class ParaLines::Ticker
 				if !f_initial_print_done
 					f_initial_print_done = true
 					shared_line ||= plines.add_shared_line
-					took_part = shared_line.part_open "#{gap}[#{title} ….0 s]"
+					took_part = shared_line.part_open (tpl_start||'%{gap}[%{title} ….0 s]') % {gap:gap, title:title}
 				end
 				took_part.update "%.1f s…" % seconds
 				sleep int
 			end
 		end
-		
-		((( yield )))
-		
-		thr.kill
-		# close took_part
-		if took_part
-			# reserve more chars for took_part so the next << output to this line will not overwrite some last chars
-			seconds_part = "%.1f" % seconds
-			more_chars_used = seconds_part.length - 3
-			if more_chars_used > 0
-				shared_line << ' '*more_chars_used
+
+		@on_stop = -> do
+			thr.kill
+			# close took_part
+			if took_part
+				# reserve more chars for took_part so the next << output to this line will not overwrite some last chars
+				seconds_part = "%.1f" % seconds
+				more_chars_used = seconds_part.length - 3
+				if more_chars_used > 0
+					shared_line << ' '*more_chars_used
+				end
+
+				took_part.close (tpl_end||'%{seconds_part} s]') % {seconds_part:seconds_part}
 			end
-			
-			took_part.close "#{seconds_part} s]"
+		end
+
+		if block_given?
+			((( yield )))
+			@on_stop.()
 		end
 	end
-	
+
+	def stop
+		@on_stop.()
+	end
+
 	def seconds
 		moment - @start
 	end
 	def moment
 		Process.clock_gettime Process::CLOCK_MONOTONIC
+	end
+end
+
+
+# -progress bar
+# created via method
+# progress = ProgressBar["Processing 15 nodes", total:10]
+# progress = C_plines.start_progress_bar "Processing 15 nodes", total:10
+# progress = sline.start_progress_bar " Zipping", bar_len:5, total:10
+#		progress.update done:5 | progress.inc
+class ParaLines::ProgressBar
+	def self.[](...)
+		self.new(...)
+	end
+	def initialize(title='', bar_len:20, total:, plines:C_plines, shared_line:nil)
+		@bar_len, @total = bar_len, total
+		shared_line ||= plines.add_shared_line
+		# (<!) edge case
+		if total == 0
+			shared_line << title
+			return
+		end
+		@part = shared_line.part_open "#{title}: […#{' '*(bar_len-1)}]"
+		@ticker = ParaLines::Ticker.new '', delay:0, int:0.5, shared_line:shared_line, tpl_start:' - ….0 s', tpl_end:'%{seconds_part} s '
+		@done = 0
+	end
+	# *done_index — starting from 0
+	def update(done:nil, done_index:nil)
+		done ||= done_index+1
+		part_done = (done.to_f / @total).clamp 0, 1
+		@part.update 'o' * (@bar_len * part_done)
+		@ticker.stop if part_done.to_i == 1
+	end
+	def inc
+		@done += 1
+		update done:@done
 	end
 end

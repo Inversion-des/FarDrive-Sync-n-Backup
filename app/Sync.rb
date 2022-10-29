@@ -28,12 +28,13 @@ begin
 rescue LoadError
 end
 $conf[:components_dir] ||= 'platform/Ruby_components'
-# use cofig _base `Core, Object, Nil, Integer, String, Array, Hash, Hash_dot_notation, FS´
+# use cofig _base `Core, Object, Nil, Integer, Time, String, Array, Hash, Hash_dot_notation, FS´
 $:.push ($conf[:components_dir] || raise('$conf[:components_dir] not defined'))
 require '_base/Core'
 require '_base/Object'
 require '_base/Nil'
 require '_base/Integer'
+require '_base/Time'
 require '_base/String'
 require '_base/Array'
 require '_base/Hash'
@@ -52,7 +53,7 @@ module Refinements
 	refine IFile do
 		def key
 			@key ||= begin
-				# *without: [/+] (thus not .base64digest)
+				# *without: [/+] chars (thus not .base64digest)
 				sha1 = Digest::SHA1.digest binread
 				Base64.urlsafe_encode64 sha1
 			end
@@ -67,7 +68,7 @@ C_plines = ParaLines.new
 
 
 # *for debugging
-def w(text)
+def w(text='')
 	C_plines.add_static_line text
 end
 def pp(o)
@@ -313,6 +314,7 @@ class Sync
 	def migrate_storages
 		# (tmp) migrate to the new data structure (2/2)
 		if !@f_set_first_run && @f_local_set_data_migrated
+			progress_line = C_plines.add_shared_line 'migrate_storages'
 			h_storage.for_each do |storage|
 				storage.in_storage_dir do
 					if !storage.set_dir_exists? && storage.files.n > 0
@@ -320,7 +322,7 @@ class Sync
 						storage.del '.db.7z'
 						storage.del 'base.dat'
 						storage.files.each do |_|
-							print '.'
+							progress_line << '.'
 							_.move_to storage.set_dir
 						end
 					end
@@ -338,7 +340,7 @@ class Sync
 
 	def filter_for(dir_key)
 		@filter_for[dir_key] ||= begin
-			db = DirDB.new dir_key, dir:@db.dir   # dir db
+			db = DirDB.new dir_key, dir:@db.dir, load_only:'filter'   # dir db
 			Filter.new(db:db).load
 		end
 	end
@@ -374,6 +376,28 @@ class Sync
 				handler.call broken_nodes, resolve
 			else
 				raise KnownError, "on - #{e} handler needed"
+			end
+		end
+
+		@hub.on :ask_confirmation do |e, msg, data, on_yes:, on_no:|
+			if handler=@on[e]
+				msg_line = C_plines.add_shared_line msg+': '
+				answer = handler.(data)
+				msg_line << answer
+				case answer
+					when 'y'; on_yes.()
+					when 'n'; on_no.()
+					else raise KnownError, "(ask_confirmation) No aswer for #{data}"
+				end
+			else
+				# default handler
+				C_plines.ask msg do |answer|
+					if answer == 'y'
+						on_yes.()
+					else
+						on_no.()
+					end
+				end
 			end
 		end
 	end
@@ -441,7 +465,7 @@ class Sync
 			@trees = {}
 			skipped = []
 
-			# scan changes in local dirs, defines: @trees, @dirs (all), @files (added and changed), skipped, @tree.stats/state
+			# scan changes in local dirs, define: @trees, @dirs (all), @files (added and changed), skipped, @tree.stats/state
 			@local_dirs.each do |key, dir|
 				dirs = get_branch_dirs dir
 				@dirs += dirs
@@ -470,23 +494,19 @@ class Sync
 			# *we cannot get size of deleted file and we do not store it in file.d
 			# @tree.stats.files_removed_size = @state.removed.files.sum(&:size).hr
 																																										#-#!!_ o^@tree.stats
-																																										# time_start
-																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 			# update db (tree_data.dat for each dir)
-																																										# time_end2^@trees.each &:save
-																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
 			# *now, when we have all tfiles — process @not_finished.files_queue
 			if @not_finished.files_queue_index.not.empty?
 																																										w("=== finish not_finished files_queue (#{@not_finished.files_queue_index.length}) ===")
-				# find files in trees by path from the files_queue_index
+				# find files from the files_queue_index in trees by path
 				@not_finished.files_queue = []
 				for path in @not_finished.files_queue_index.keys
 					dir_path = File.dirname path
 					fn = File.basename path
 					for tree in @trees.values
 						if tdir=tree.tdir_by_path[dir_path]
-							if tfile=tdir.tfile_by_name[fn]
+							# *skip aready deleted files
+							if (tfile=tdir.tfile_by_name[fn]) && tfile.exists?
 								@not_finished.files_queue << tfile
 							end
 						end
@@ -500,10 +520,13 @@ class Sync
 				end
 			end
 
-
+			 																																							# time_start
+			 																																							_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 			#. this save should be as close as possible to make_packs! where we do @not_finished.files_queue save
 			@trees.values.each &:save
-
+																																										# time_end2^@trees.each &:save
+																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
+																																										w("(@trees.each &:save) processed in #{'%.3f' % ttime}")
 			# *** work with the main list of detected changed files ***
 			all_zips_ready = make_packs! @files
 
@@ -534,7 +557,7 @@ class Sync
 				h_storage.balance_if_needed
 				h_storage.save_db   # storages.dat (3/3)
 			rescue
-				puts "! ! ! balance_if_needed failed: #$!"
+				w "! ! ! balance_if_needed failed: #$!"
 			end
 
 			# upload base.dat separately to the root (needed for detecting full fast_one storage for down)
@@ -695,13 +718,36 @@ class Sync
 																																							#~ down
 			tasks = []
 			reuse_tasks = []
+			nodes_total = 0
+			# prepare processing tasks
+			# *due to the preserved insert order of a Hash we have here parent folders paths before children, so no need to sort
 			for dir_path, dir_up_d in up_db.tree_data
 				#. skip old deleted dirs or if dir doesn't exist
 				next if dir_up_d[:deleted] && !@f_force_update && (!tree_data[dir_path] || tree_data[dir_path][:deleted])
 				dir = IDir.new dir_path, base:local_dir.abs_path
 				tasks << [dir, dir_path, dir_up_d]
+				nodes_total += 1
+				# *files of deleted dirs are not processed
+				if !dir_up_d[:deleted] && dir_up_d[:files]
+					nodes_total += dir_up_d[:files].reject{|k, v| v.excluded }.length
+				end
 			end
 
+			# show progressbar
+			# *if processing is very fast — progress bar will not be shown
+			progress_thread = Thread.new do
+				progress = nil
+				loop do
+					sleep 0.5
+					break if nodes_processed_by_path.length == nodes_total
+					progress ||= ProgressBar["Processing #{nodes_total} nodes: ", total:nodes_total]
+					progress.update done:nodes_processed_by_path.length
+				end
+			ensure
+				progress.and.update done:nodes_total
+			end
+
+			# (LONG) main processing
 			do_in_parallel(tasks:tasks) do |dir, dir_path, dir_up_d|
 																																										#-#!_ trace^dir_up_d
 				# *08.08.21: now we do not save .excluded dirs in db
@@ -709,49 +755,81 @@ class Sync
 #					nodes_processed_by_path[dir_path] = 1   # prevents deletion of this folder
 #					next
 
-				while !dir.parent.exists?
+				pline = nil
+				while !nodes_processed_by_path[dir.parent.path]
+					break if dir_path == '.'
 					# retry few times (it can be created in a parallel thread)
 					attempt ||= 0
 					attempt += 1
-					if attempt > 5
+					pline ||= C_plines.add_shared_line '['
+					if attempt > 50
 						# was: raise
-						w "(parent.exists?) failed for: #{dir.parent.path}"
+						w "(wait for parent processed) failed for this parent: #{dir.parent.path}"
 						break
 					end
-					print '^'
-					sleep 0.001
+					pline << '^'
+					sleep 0.010
 				end
+				pline << ']' if pline
 				next if !dir.parent.exists?
 																																							#~ down
 				# process this dir
-				nodes_processed_by_path[dir_path] = 1
+				# (<)
 				if dir_up_d.deleted
 					# (<)
 					#. *we should delete dirs and files after all other operations (in some cases file can be used)  (1/3)
 					dirs_to_delete << dir
+					nodes_processed_by_path[dir_path] = 1
 					next
 				# dir should exist
 				else
 					# if exists
 					if tree_data[dir_path] && dir.exists?
 						if dir_path != '.'
-							# type changed dir/dir_link
+							# type changed dir -> dir_link
 							if dir_up_d.link
 								# dir > dir_link || link changed
 								if !dir.symlink? || dir.link.path != dir_up_d.link
-									dir.del!
-									# try to create dir symlink
-									res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
-									if res.failed
-										dir_symlinks_failed << res
+									# (!!!) potential big data loss
+									if !dir.symlink? && dir.fast_children.all_names.n > 0
+										msg = <<~END.chomp
+											 (!) We are going to convert dir into a symlink
+											  - #{dir.abs_path} -- all the content here will be deleted (#{dir.files_in_branch.n} files)
+													  v
+											  - #{dir_up_d.link}
+											Are you sure? (y/-)
+										END
+										@hub.fire :ask_confirmation, msg, {id:dir.path},
+											on_yes: -> do
+												w '- DELETE dir -'
+												dir.del!
+												# try to create dir symlink
+												res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
+												if res.failed
+													dir_symlinks_failed << res
+												end
+											end,
+											on_no: -> do
+												w '- dir skipped -'
+											end
+									else
+										dir.del!
+										# try to create dir symlink
+										res = dir.symlink_to dir_up_d.link, lmtime:dir_up_d.mtime, can_fail:true
+										if res.failed
+											dir_symlinks_failed << res
+										end
 									end
 								end
+
+							# type changed dir_link -> dir
 							elsif dir.symlink? && !dir_up_d.link
+								# *can be a long operation
 								dir.del!
 								dir.create(mtime:dir_up_d.mtime)
 							end
 						end
-					# if dir missed
+					# (<) if dir missed
 					else
 						# create
 						if dir_up_d.link
@@ -769,15 +847,17 @@ class Sync
 									w "(on_ready) dir skipped due to Windows MAX_PATH limit:\n  #{dir.abs_path}"
 									skipped_due_to_max_path << dir
 								else
-									pputs "(on_ready) ENOENT: #{dir.path}"
-									puts $!
-									puts $@.first 7
+									w
+									w "(on_ready) ENOENT: #{dir.path}"
+									w $!
+									w $@.first 7
 								end
 								# (<) do not process dir attrs and files
 								next   # dir
 							end
 						end
 					end
+					nodes_processed_by_path[dir_path] = 1
 				end
 																																							#~ down
 				# (<) if link — do not process files
@@ -791,16 +871,14 @@ class Sync
 					f_down = nil
 					fpath = path_+fname
 					file = IFile.new fpath, base:local_dir.abs_path
+					nodes_processed_by_path[fpath] = 1
 					if file_up_d.deleted
 						#. *we should delete dirs and files after all other operations (in some cases file can be used)  (2/3)
 						files_to_delete << file
-						nodes_processed_by_path[fpath] = 1
 					# if file should exist
 					else
 						# if file data or file exists
 						if (file_d=tree_data[dir_path]&.files[fname]) || file.lexists?
-							nodes_processed_by_path[fpath] = 1
-
 							# type changed file/file_link
 							if file_up_d.link
 								# file > file_link || link changed
@@ -864,8 +942,8 @@ class Sync
 						if f_down
 							# (<) if chunk is available (like when file renamed or there is a copy) — reuse
 							key = file_up_d.versions.last
-							# *files arr can be empty if all the file instances deleted
-							if !@f_force_update && chunk=Chunk[key]
+							# *files arr can be empty if all the file instances deleted, .files can be missed sometimed due to interrupted make_packs!
+							if !@f_force_update && (chunk=Chunk[key]) && chunk.files
 								same_file = catch :found do
 									for path in chunk.files
 										same_file = IFile.new path, base:local_dir.abs_path
@@ -896,7 +974,7 @@ class Sync
 						end
 					end
 				end
-			end
+			end   # do_in_parallel/
 
 			# reuse local instance - step 2/2 — update files
 			reuse_tasks.each do |file, body, file_up_d|
@@ -908,8 +986,10 @@ class Sync
 				update_file file, file_up_d
 			end
 
+			 																																							w(%Q{files_to_delete.n=}+files_to_delete.n.inspect)
 			# *we should delete dirs and files after all other operations (in some cases file can be used)  (3/3)
 			files_to_delete.each &:del!
+			 																																							w(%Q{dirs_to_delete.n=}+dirs_to_delete.n.inspect)
 			dirs_to_delete.each &:del!
 																																							#~ down
 			# retry failed dir symlink creations
@@ -917,9 +997,11 @@ class Sync
 				begin
 					res.retry.()
 				rescue FS::KnownError
-					puts $!
+					w $!
 				end
 			end
+
+			progress_thread.kill
 			# process local tree — delete not marked nodes
 			# 08.08.21: do not delete not marked nodes, delete only nodes that have .deleted in up_db
 #			# *proc needed to localize vars: dir, file
@@ -949,7 +1031,13 @@ class Sync
 			# {fpath, file_key}
 			files_to_download_queue.each do |file_d|
 				d=@up_db.data_by_file_key[file_d.file_key]
-				on_ready = -> (file_body) do
+				# (<!) *it is possible that file has a file_key but is in not_finished.dat and not in any pack yet so we cannot restore it
+				if !d
+					w "  ! file '#{file_d.fpath}' is not in any pack yet, probably it is in the not_finished.files_queue yet -- skipping"
+					next
+				end
+
+				on_ready = -> (file_body, pack_line) do
 					file = file_d.file
 					file.binwrite file_body
 					# fix mtime for some files (chunk is the same but mtime differ)
@@ -961,9 +1049,10 @@ class Sync
 						w "(on_ready) file skipped due to Windows MAX_PATH limit:\n  #{file.abs_path}"
 						skipped_due_to_max_path << file
 					else
-						pputs "(on_ready) ENOENT: #{file.path}"
-						puts $!
-						puts $@.first 7
+						w
+						w "(on_ready) ENOENT: #{file.path}"
+						w $!
+						w $@.first 7
 					end
 				rescue Errno::EACCES, Errno::EINVAL
 					# retry few times
@@ -974,11 +1063,12 @@ class Sync
 					if attempt <= 5
 						file.del!
 						sleep 0.5
-						print ','
+						pack_line << ','
 						retry
 					else
-						pputs "(on_ready) failed: #$!"
-						puts $@[0]
+						w
+						w "(on_ready) failed: #$!"
+						w $@[0]
 					end
 				end
 
@@ -992,6 +1082,14 @@ class Sync
 			tasks = []
 			pack_index = 0
 			loading_packs_by_name.each do |pack_name, arr; _time_start|
+				# (<!) skip nil pack (possible if make_packs interrupted and files are in the not_finished.files_queue)
+				if !pack_name
+					keys = arr.map {|_| _.file_key }
+					w "  ! pack_name missed for #{arr.n} files, probably they are in the not_finished.files_queue yet -- skipping"
+					w "    files keys: #{keys}"
+					next
+				end
+
 				tasks << -> do
 																																										# time_start
 																																										_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -1004,10 +1102,15 @@ class Sync
 																																										#-#!!_ w^get: =task_title =fname=arr_storage_part ...
 																																										pack_line = C_plines.add_shared_line " <<< %-35s#{arr_storage_part} ..." % ["#{task_title} #{fname}"]
 
-					# download
+					# (<!) download
 					# *we do not use tmp files if reading from LocalFS
 					tmp_dir = storage.is_a?(Storage::LocalFS) ? nil : @tmp_dir
-					up_pack_file = storage.get fname, to:tmp_dir
+					begin
+						up_pack_file = storage.get fname, to:tmp_dir
+					rescue Storage::FileNotFound
+						w "  ! pack '#{fname}' missed on the remote storage, probably it is in the not_finished.uploadings yet -- skipping"
+						next
+					end
 																																										#-#!!_ w^... got =task_title =up_pack_file.size.hr
 																																										# do^pack_line << "%10s ..." % [up_pack_file.size.hr]
 																																										pack_line << "%10s ..." % [up_pack_file.size.hr]
@@ -1017,7 +1120,7 @@ class Sync
 						ZipCls.new(zip:zip).unpack_files(fnames) do |fname, file_body|
 							d_arr = d_arr_by_file_key[fname]
 							for d in d_arr
-								d.on_ready.call file_body
+								d.on_ready.call file_body, pack_line
 							end
 						end
 					end
@@ -1070,15 +1173,10 @@ class Sync
 			 																																							ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
 			 																																							w("(fix dirs mtime) processed in #{'%.3f' % ttime}")
 		end
-
-		# -- when all dirs restored --
-		 																																								# time_start
-		 																																								_time_start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+		# -- when all dirs processed --
 		# swap db files
 		up_db_dir >> @db.dir
-																																										# time_end2^update db
-																																										ttime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - _time_start   # total time
-																																										w("(update db) processed in #{'%.3f' % ttime}")
+
 		# list skipped items due to Windows MAX_PATH limit
 		skipped_due_to_max_path.tap do |skipped|
 			@stats.skipped_due_to_max_path = skipped.n
@@ -1148,34 +1246,37 @@ class Sync
 			end
 			reset_pack.()
 																																							#~ make_packs!
-			files_queue = files.sort_by &:mtime   # (old -> new)
-			#. *needed for stable tests
-			files_queue.sort_by! {|_| [_.mtime, _.size] } if TESTS
+			# sort by a date part like "2022-10-12" (old -> new) and size (big -> small)
+			files_queue = files.sort_by {|_| [_.mtime.to_s[0,10], -_.size, _.name] }
 			@not_finished.files_queue = files_queue.dup
 			@not_finished.save
 			removed_files = []
+			f_just_added_by = {}
 			removed_files_total_compressed_size = 0
-			f_force_add = false
+			force_add_count = 0
 			skipped_n = 0
 			skipped_total_size = 0
 			creating_zips_n = 0
 			f_all_files_processed = false
 			while file=files_queue.shift
 				# if file is already in some pack — skip
-				if file.chunk
+				file.chunk   # *bind file to chuck if needed
+				if f_just_added_by[file.key] || file.chunk.and.pack_name
 					pack_skipped_n += 1
 					skipped_n += 1
 					skipped_total_size += file.size
 					@not_finished.files_queue.pull file
+																																										w(" ! ! ! skip #{file.name}")
 				# (<!) if file is too big — skip (should help to skip big files if we are close to the target pack size)
-				elsif zip.files.n > 0 && file.size > last_min_size_diff * 2
+				elsif force_add_count==0 && zip.files.n > 0 && file.size > last_min_size_diff * 2
 					removed_files << file
+					# *not ideal because we add not compressed size, but it is fast
 					removed_files_total_compressed_size += file.size
-
+																																										w("file removed (too big)")
 				else
 					# (LONG) add file to zip
 					file_compressed_size = nil
-					Ticker[title:"zip.add #{file.size.hr} #{file.ext} took"] do
+					Ticker["zip.add #{file.size.hr} #{file.ext} took"] do
 						# *use file.key instead of name to avoid collisions
 						#  do not add ext because files with different ext may have same content
 						file_compressed_size = zip.add file, as:file.key
@@ -1187,11 +1288,18 @@ class Sync
 					# mark that a file is now in some pack, so same files will be skipped
 					# *chunk info will be updated later when we have the pack name (chunk.update)
 					file.create_chunk
+					f_just_added_by[file.key] = 1
 				end
-				unless f_force_add
+				if force_add_count>0
+					force_add_count -= 1
+				else
 					size_diff = (target_pack_size - zip.size).abs
-					if size_diff > last_min_size_diff || zip.size > target_pack_size
+					f_oversize = zip.size > target_pack_size
+					if size_diff > last_min_size_diff || f_oversize
+						if f_oversize
+							:log
 																																										w("    oversize: #{zip.size.hr} > #{target_pack_size.hr}  (diff: #{size_diff.hr})")
+						end
 						if zip.files.n == 1
 							f_one_big_file = true
 																																										w("    f_one_big_file")
@@ -1199,6 +1307,7 @@ class Sync
 																																										w("    rem_last (#{file_compressed_size.hr})")
 							zip.rem_last
 							file.delete_chunk
+							f_just_added_by.delete file.key
 							removed_files << file
 							removed_files_total_compressed_size += file_compressed_size
 							size_diff = last_min_size_diff
@@ -1208,20 +1317,31 @@ class Sync
 					end
 				end
 																																							#~ make_packs!
+				f_pack_size_ok = f_one_big_file || size_diff < diff_size_ok
 				# (<) if not many removed files remained — add to the last pack
-				if files_queue.empty? && removed_files.not.empty? && removed_files_total_compressed_size < target_pack_size/2
+				if files_queue.empty? && removed_files.not.empty? && removed_files_total_compressed_size < target_pack_size*0.2
 																																										w("    not many removed files remained (#{removed_files.n}) — add to the last pack")
+					force_add_count = removed_files.n
 					# re-add removed files
 					files_queue.unshift *removed_files
 					removed_files.clear
 					removed_files_total_compressed_size = 0
-					f_force_add = true
+					# *continue to process files_queue
+					next
+				# (<) if few small files left — force add to the current pack
+				# *but not if it was one big file because for one file we use cached compressed state
+				elsif f_pack_size_ok && !f_one_big_file && force_add_count==0 && files_queue.not.empty? && files_queue.n < 20 && files_queue.sum(&:size) < target_pack_size*0.2
+																																										w("    few small files left (#{files_queue.n}) — force add to the current pack")
+					force_add_count = files_queue.n
 					# *continue to process files_queue
 					next
 				end
 
+				# (<!) add all the rest files if force_add_count
+				next if force_add_count>0
+
 				# finish this pack
-				if f_one_big_file || size_diff < diff_size_ok || files_queue.empty?
+				if f_pack_size_ok || files_queue.empty?
 																																										w("finish this pack")
 																																										w(%Q{zip.files.n=}+zip.files.n.inspect)
 					if zip.files.not.empty?
@@ -1246,9 +1366,9 @@ class Sync
 							#. *needed to break processing of files_queue (not_finished files_queue will be not empty)
 							uploading_line = C_plines.add_shared_line "(in thr) > > >  #{pack_file.name}"
 							creating_zips_n += 1
-
+																																							#~ make_packs!
 							# (LONG) compress again (if not cached) and save archive (.7z file in the tmp dir)
-							Ticker[title:"zip.save_as #{zip.size.hr} took", shared_line:uploading_line] do
+							Ticker["zip.save_as #{zip.size.hr} took", shared_line:uploading_line] do
 								# *clears :zip_data, :as from files data
 								zip.save_as pack_file
 							end
@@ -1258,17 +1378,17 @@ class Sync
 								TestTriggers['(up) uploading thread delay']&.(pack_id)
 							end
 																																										#-#!!_ w^ > > >  =pack_file.name (=pack_file.size.hr)
-							# update @not_finished.files_queue and files chunks (should be after .save_as)
-							zip.files.each do |_|
-								@not_finished.files_queue.pull _
-								_.chunk.update(
-									pack_name:pack_name
-								)
-							end
-
 							# *ensure consistent state
 							@db.transaction_start [:data_by_file_key, :base, :not_finished], tx_mutex do
+								# update @not_finished.files_queue and files chunks (should be after .save_as)
+								zip.files.each do |_|
+									@not_finished.files_queue.pull _
+									_.chunk.update(
+										pack_name:pack_name
+									)
+								end
 								# update data_by_file_key.dat (1/2)
+								# *at this point some files can be saved witout .pack_name — this is handled by "if file.chunk?.pack_name"
 								Chunks.save
 								# update last_pack_id in base.dat only when a zip file is saved
 								@db.base.tap do |_|
@@ -1280,7 +1400,6 @@ class Sync
 									end
 								end
 
-								# move archive to remote dir on all storages (in parallel) - (1/2)
 								@not_finished.uploadings << pack_file.name
 								@not_finished.save
 							end
@@ -1291,6 +1410,7 @@ class Sync
 								all_zips_ready.done!
 							end
 
+							# move archive to remote dir on all storages (in parallel) - (1/2)
 							# TestTrigger fail^(up) exit after move archive to remote dir, pack_id
 							if TESTS
 								raise TestTriggerError if TestTriggers['(up) exit after move archive to remote dir']&.(pack_id)
@@ -1305,7 +1425,7 @@ class Sync
 							h_storage.save_db   # storages.dat (2/3)
 
 							pack_file.del!
-
+																																							#~ make_packs!
 						rescue TestTriggerError
 							# *this will stop @my_thread and all @uploading_threads
 							@my_thread.raise $!
@@ -1524,7 +1644,12 @@ class Tree
 			parent_tdir = @tdir_by_path[parent_path]
 			tdir = @Dir.new d_path, base:@root_dir, parent_tdir:parent_tdir
 			@tdir_by_path[d_path] = tdir
-			@all_dirs << tdir
+			# mark dir as excluded if the parent_tdir became a symlink
+			if tdir.behind_symlink_now?
+				tdir.behind_symlink_now!
+			else
+				@all_dirs << tdir
+			end
 		end
 
 		# add new dirs
@@ -1567,8 +1692,8 @@ class Tree
 	end
 
 	def save
-		# *do not save excluded dirs in db because there can be many tmp dirs and we do not clrear them from db
-		@db.reject! {|k, v| v.excluded }
+		# *do not save excluded dirs in db because there can be many tmp dirs and we do not clear them from db
+		@db.reject! {|k, v| v.excluded || v.behind_symlink_now }
 
 		#. *sorting needed for tests to compare results (after adding processing in threads)
 		@db.replace @db.sort.to_h if TESTS
@@ -1642,14 +1767,22 @@ class Tree::Dir < IDir
 				Tree::File.new(@path_+fname, tdir:self, excluded: @filter.excludes?(fname) )
 					.tap {|_| @tfile_by_name[fname] = _ }
 			end
-			@tdirs = @d.dirs.keys.map do |dname|
+			@tdirs = @d.dirs.keys.filter_map do |dname|
 				#. *optimized way instead of using  self+dname
 				dpath = @f_is_root_dir ? dname : @path_+dname
-				@tree.tdir_by_path[dpath]
-					.tap {|_| @tdir_by_name[dname] = _ }
+				# *probably subdir could be missed in the map when we did  @d.dirs[dname] = 1  even if folded did not exist (now it is fixed)
+				tdir = @tree.tdir_by_path[dpath]
+				next if !tdir
+				@tdir_by_name[dname] = tdir
+				tdir
 			end
 		end
-																																							#~ Tree::Dir
+																																							#~ Tree::Dir - update
+		# (<!)
+		if behind_symlink_now?
+			# behind_symlink_now!
+			return
+		end
 
 		# *updates excluded flag
 		@filter.init
@@ -1702,11 +1835,12 @@ class Tree::Dir < IDir
 				else
 					f_dir_ok = true
 				end
-																																							#~ Tree::Dir
+																																							#~ Tree::Dir - update
 				if f_dir_ok
 					# *we do not save mtime for the root dir because for example in tests this dir is always changed and then
 					#   tree_data.dat is not matched with the version in the "good packs" (2/2)
 					@d.mtime = mtime.to_i unless @f_is_root_dir
+					# check children
 					_ = fast_children full:true
 					files_names = _[:files_names]
 					files_paths = _[:files_paths]
@@ -1741,15 +1875,17 @@ class Tree::Dir < IDir
 						if @f_is_root_dir
 							next if dname.in? Shared.skip_root_nodes
 						end
-						# add new if needed
-						@tdir_by_name[dname] ||= begin
-							@d.dirs[dname] = 1
-							dir = @tree.tdir_by_path[dir_path]
-							if !dir && !@tree.state.dirs_skipped_by_path[dir_path]
-								raise("folder not found in tdir_by_path: #{dir_path}")
+						# add new subdirs if needed
+						if !@tdir_by_name[dname]
+							if dir=@tree.tdir_by_path[dir_path]
+								@d.dirs[dname] = 1
+								@tdirs << dir
+								@tdir_by_name[dname] = dir
+							else
+								if !@tree.state.dirs_skipped_by_path[dir_path]
+									w " ! folder not found in tdir_by_path: #{dir_path}"
+								end
 							end
-							@tdirs << dir
-							dir
 						end
 					end
 					# update all files
@@ -1768,14 +1904,18 @@ class Tree::Dir < IDir
 
 		self
 	end
-																																							#~ Tree::Dir
+																																							#~ Tree::Dir - update/
 	# (>>>)
 	def delete
+		# ignore flag^@f_deleting
+		return if @f_deleting
+		@f_deleting = true
 		# ignore if^@d.deleted || @d.excluded
 		return if (@d.deleted || @d.excluded)
 		update   # ensure updated
 		@d.deleted = {at:at}
-		@parent_tdir.d.dirs.delete name
+		#. *if parent became synlink — there can be no @parent_tdir or no .dirs
+		@parent_tdir.and.d.and.dirs.and.delete name
 		@hub.fire :dir_removed, self
 																																										w("dir removed - #{self.inspect}")
 		# delete files
@@ -1801,6 +1941,18 @@ class Tree::Dir < IDir
 	end
 	def unexclude
 		@d.delete :excluded
+	end
+	def behind_symlink_now!
+		update   # ensure @tfiles defined
+		@d.behind_symlink_now = 1
+																																										w("dir behind symlink now - #{self.inspect}")
+		@tfiles.each &:behind_symlink_now!
+	end
+	def behind_symlink_now?
+		@parent_tdir.and.then {|_| _.symlink? || _.marked_as_behind_symlink_now? }
+	end
+	def marked_as_behind_symlink_now?
+		@d.behind_symlink_now
 	end
 
 	def resolve(choise)
@@ -2042,6 +2194,13 @@ class Tree::File < IFile
 			Chunk[_].and.unbind_file key_path
 		end
 	end
+	def behind_symlink_now!
+		# unbind from chunks
+		@d.versions.and.each do |_|
+			Chunk[_].and.unbind_file key_path
+		end
+		 																																								w("file behind symlink now - #{self.inspect}")
+	end
 	def as_file?
 		return true if @d.and.as_file || @resolved.as_file
 	end
@@ -2105,7 +2264,8 @@ class Chunk
 		end
 		
 		def create(key)
-			@@db[key] = {}
+			# *do not reset if exists
+			@@db[key] ||= {}
 		end
 		def delete(key)
 			@@db.delete key
@@ -2126,6 +2286,9 @@ class Chunk
 		@files = Set.new @d.files
 	end
 																																							#~ Chunk
+	def pack_name
+		@d.pack_name
+	end
 	def files
 		@d.files
 	end
@@ -2614,8 +2777,8 @@ class StorageHelper
 			# *fails if storage_dir is not available
 			storage.storage_dir
 		rescue KnownError
-			puts "(#{@context} - StorageHelper) prepare for #{key} failed: #$!"
-			puts "! ! ! (#{@context} - StorageHelper) #{key} rejected"
+			w "(#{@context} - StorageHelper) prepare for #{key} failed: #$!"
+			w "! ! ! (#{@context} - StorageHelper) #{key} rejected"
 			# remove bad storage from array
 			storages.delete key
 		end
@@ -2657,14 +2820,14 @@ class StorageHelper
 																																											w("(#{@context} - fast_one) #{key} error: #{$!.inspect}")
 						# *do not use storage if base.dat is missed there
 						# remove bad storage from array
-						puts "! ! ! (#{@context} - StorageHelper) #{key} rejected"
+						w "! ! ! (#{@context} - StorageHelper) #{key} rejected"
 						storages.delete key
 						:skip
 					end
 				end
 
 			rescue Timeout::Error
-				puts "! ! ! (#{@context} - fast_one) Timeout error, n: #{n}"
+				w "! ! ! (#{@context} - fast_one) Timeout error, n: #{n}"
 			end
 
 			raise KnownError, "(#{@context} - fast_one) error: all storages skipped (base.dat missed)" if n == 0

@@ -250,8 +250,9 @@ class IPath
 	end
 																																							#~ IPath
 	# -symlink -link
-	# *if src doesn't exist yet — link will be broken
-	# *src can be abs or relative
+	# - if src doesn't exist yet — link will be broken
+	# - src can be abs or relative
+	# - dir should be empty or it fails with Errno::ENOTEMPTY
 	# res = symlink_to src, lmtime:dir_up_d.mtime, can_fail:yes
 	# if res.failed
 	#		res.retry.()
@@ -264,8 +265,15 @@ class IPath
 			raise FS::KnownError, msg unless target.exists?
 			delete if lexist?
 			parent.in do
-				# inside: File.symlink ori_path, link_name
-				make_symlink src
+				# *inside: File.symlink ori_path, link_name
+				begin
+					make_symlink src
+				rescue Errno::EACCES
+					nputs '  ( ! ) this problem can be resolved on Windows if you enable the Developer Mode:'
+					puts   '  Settings - Update & Security - (For Developer) tab - Developer Mode: On'
+					putsn '  more infor here: https://www.ghacks.net/2016/12/04/windows-10-creators-update-symlinks-without-elevation/'
+					raise
+				end
 				#. *broken link was a file, now it is a dir
 				flush!
 				if lmtime
@@ -332,6 +340,18 @@ class IPath
 		all ? arr : (arr & C_attributes)
 	rescue Errno::ENOENT
 		raise Errno::ENOENT, "(attrs) ENOENT: #{path}"
+	# No such process - GetFileAttributes
+	rescue Errno::ESRCH
+		# retry few times
+		# inc^attempt
+		attempt ||= 0
+		attempt += 1
+		if attempt <= 5
+			print ','
+			sleep 0.5
+			retry
+		end
+		raise "(attrs) failed: #$! (Errno::ESRCH) for: #{path}"
 	end
 																																							#~ IPath
 	C_attributes.each do |m|
@@ -565,7 +585,7 @@ class IDir < IPath
 		raise "Cannot clear! dir: #{path}"
 	end
 																																							#~ IDir
-	# *slow
+	# *slow  -branch
 	def branch_files_sizes
 		# was all_nodes.files instead of files_in_branch
 		@branch_files_sizes ||= files_in_branch.map &:size
@@ -585,6 +605,8 @@ class IDir < IPath
 	# nodes = @src_dir.all_nodes
 	#	  reject_by_start: [@db.dir, @tmp_dir.name, 'w.txt'] | '.db'
 	# << INodes
+	# *10 times slower then:
+	#	dirs = @local_dir.glob("*/", File::FNM_DOTMATCH)
 	def all_nodes(reject_by_start:nil)
 		# *glob returns [IDir/IFile], not INodes, and set_base not applied
 		self
@@ -669,7 +691,7 @@ class IDir < IPath
 	# ! fails if there is a Junction (not symlink) in the branch
 	rescue WIN32OLERuntimeError
 		children.then do |_|
-			# *recue needed to handle Errno::ENOENT for broken links
+			# *rescue needed to handle Errno::ENOENT for broken links
 			_.dirs.sum(&:total_size_b) + _.files.sum{|_| _.size rescue 0 }
 		end
 	end
@@ -686,10 +708,12 @@ class IDir < IPath
 		total_size_b + cluster_overhang
 	end
 
+	# -branch
+	# << arr of pn
 	def files_in_branch
 		@files_in_branch ||= self
 			.glob('**/*', File::FNM_DOTMATCH)
-			.reject {|_| _.directory? }
+			.reject(&:directory?)
 	end
 	def flush_files_in_branch
 		@files_in_branch = nil
@@ -807,7 +831,8 @@ class IDir < IPath
 
 	alias :<< copy_in
 
-	# -copy content of a dir, not the dir itself  ->>
+	# -copy to
+	# content of a dir, not the dir itself  ->>
 	# dest: IDir
 	def copy_to(dest)
 		dest = IDir.new(dest) if dest.string?
@@ -824,7 +849,7 @@ class IDir < IPath
 	end
 
 
-	# (>>>)
+	# (>>>)  -glob -branch
 	def glob(*args)
 		begin
 			@pn.glob *args
@@ -922,6 +947,17 @@ class IFile < IPath
 	def open(*args, &block)
 		@file = File.open abs_path, *args, &block
 		self
+	# *file can be locked temporarily
+	rescue Errno::EACCES
+		# retry few times
+		attempt ||= 0
+		attempt += 1
+		if attempt <= 5
+			print ','
+			sleep 0.5
+			retry
+		end
+		raise
 	end
 
 	def method_missing(m, *args, &block)
@@ -1083,6 +1119,8 @@ class IFile < IPath
 	end
 
 	# -change -modify -update
+	#	file.change do |lines, body|
+	#		body.sub 'NewPro', @name
 	def change
 		lines = pn.readlines
 		body = lines.join
@@ -1090,6 +1128,20 @@ class IFile < IPath
 		new_body = res.array? ? res.join : res
 		pn.write new_body
 	end
+
+	# -eval -load
+	def eval
+		instance_eval read
+	rescue Exception
+		raise KnownError, "(eval) failed for: #{read}"
+	end
+	alias :load eval
+	# -dump -save
+	def dump(data)
+		# *saves with CRLF on Win
+		write data.inspect
+	end
+	alias :save dump
 
 	# -checksum -md5
 	def md5_checksum

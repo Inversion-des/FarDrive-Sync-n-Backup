@@ -2,7 +2,7 @@
 # @db ?= DirDB.new(dir:$app_dir)
 # @db = DirDB.new '.db_folder' — default .db
 # @db.load — will load all files
-# @db = DirDB.new('db_global').load 'storage_GoogleDrive' — load only one file
+# @db = DirDB.new('db_global', load_only:'storage_GoogleDrive') — load only one file
 # @last_themes = @db.last_themes.names ||= []
 # @db.node_data_by_path.default_proc ?= proc {|h, k| h[k]={} } — we have to use this, because ?= {{}} is ignored for existing hash
 # @db.test[:now] = Time.now.to_i
@@ -13,6 +13,8 @@
 #   @db = sync_db.storages[key] ?= {}
 #   sync_db.add_save!(@db, 'storages')
 #   @db.save
+# db files in cur dir + auto save at_exit
+#		@db ?= DirDB.new('.', dir:@target_dir, save_at_exit:1)
 # frozen_string_literal: true
 #
 # transaction of db: save only all listed cols together or none
@@ -49,8 +51,8 @@ class DirDB
 	end
 
 	# *bin — in prod use Marshal dump/load for these files (name, no ext)
-	def initialize(dname=nil, dir:Dir.pwd, load:true, bin:[])
-		@dname = dname&.to_s || C_default_dir
+	def initialize(dname=C_default_dir, dir:Dir.pwd, load:true, load_only:nil, bin:[], save_at_exit:nil)
+		@dname = dname.to_s
 		@dir = IDir.new dir
 		@bin = bin.create_index
 		@ext = '.dat'
@@ -58,7 +60,16 @@ class DirDB
 		@mutex_by_name = {}
 		@active_transactions = []
 		@tx_by_name = {}
-		self.load if load
+		if load_only
+			self.load load_only
+		elsif load
+			self.load
+		end
+		if save_at_exit
+			at_exit do
+				save
+			end
+		end
 	end
 
 	# for k, v in @up_db
@@ -131,7 +142,8 @@ class DirDB
 					if !data
 						# *binread here causes of errors like:
 						# `encode': "\\xC2" to UTF-8 in conversion from ASCII-8BIT to UTF-8 to UTF-16LE (Encoding::UndefinedConversionError)
-						data = eval(File.read path)
+						# *sometimes eval returns nil (like in case of binary data)
+						data = eval(File.read path) || raise('(DirDB - load) failed to load: '+path)
 					end
 					self.send name+'=', data
 				end

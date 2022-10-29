@@ -84,7 +84,16 @@ class Ruby7Zip < ZipEngine
 	@@compressed_size_by_fp = {}
 	attr :files
 	def initialize(**up)
-		require 'seven_zip_ruby'
+		# *patch once
+		if require 'seven_zip_ruby'
+			# *patch to remove mutex (so zips in 2 threads will really work in parallel and no issues)
+			#	 real results: down from LocalFS became 2x faster (CPU usage increased from 30% to 75%)
+			#   tests: total time not improved
+			for cls in [SevenZipRuby::Writer, SevenZipRuby::Reader]
+				cls.send :remove_const, :COMPRESS_GUARD   # avoid: warning: already initialized constant
+				cls.const_set :COMPRESS_GUARD, nil
+			end
+		end
 		super
 		@size = 0
 		@files = []
@@ -170,9 +179,9 @@ class Ruby7Zip < ZipEngine
 	end
 	# -size -factor -k
 	def size
-		# *solid archive result is usually smaller, so here we try to estimate real final size
-		#  tried to add dependance from files count but it caused sometimes that total size decreased after adding some small file and the pack calibration logic was broken
-		return @size.div 1.1
+		# *solid archive result size for multiple files is usually smaller, so here we try to estimate real final size
+		#  - tried to add dependance from files count but it caused sometimes that total size decreased after adding some small file and the pack calibration logic was broken
+		@files.n == 1 ? @size : @size.div(1.1)
 	end
 	# cls.new(fp:'db2.7z').pack_dir dir_or_path, skip_by_path:['path']|{'path' => 1}
 	def pack_dir(path, skip_by_path:{})
@@ -212,7 +221,7 @@ class Ruby7Zip < ZipEngine
 				.map do |name|
 					# *sometimes there are errors (no such file in the pack)
 					entry_by_fname[name].tap do |_|
-						puts "(unpack_files) error: '#{name}' file missed in the pack" if !_
+						w "(unpack_files) error: '#{name}' file missed in the pack" if !_
 					end
 				end
 				.reject(&:nil?)

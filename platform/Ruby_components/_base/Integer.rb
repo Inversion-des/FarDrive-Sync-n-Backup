@@ -25,7 +25,6 @@ class Numeric
 end
 
 
-
 class Integer
 	# for -time
 	def min
@@ -77,4 +76,36 @@ class Integer
 	end
 	# human readable
 	alias :hr readable
+
+	# -say time  -time
+	def say_time(o={})
+		o[:show_zero_s] ||= false
+		sec_passed = self
+		days = sec_passed/86400
+			sec_passed -= days*86400
+		hours = sec_passed/3600
+			sec_passed -= hours*3600
+		minutes = sec_passed/60
+		seconds = sec_passed - minutes*60
+
+		arr = []
+		arr << "#{days}d" if days>0
+		arr << "#{hours}h" if hours>0
+		arr << "#{minutes}m" if minutes>0
+		# show seconds if < 3 mins
+		arr << "#{seconds}s" if (minutes<3 && seconds > 0 || o[:show_zero_s])
+
+		arr.join ' '
+	end
+end
+
+
+class Float
+	def say_time
+		if self<60
+			"%.1fs" % self
+		else
+			self.to_i.say_time
+		end
+	end
 end

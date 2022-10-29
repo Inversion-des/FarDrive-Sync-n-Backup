@@ -25,16 +25,19 @@ class Storage
 		def sync(from:nil, to:nil)
 			# get files in parallel
 			files = {}
-			[from, to].map do |storage|
-				Thread.new do
-					files[storage] = storage.files
-				end
-			end.each &:join
+			Ticker['get files took'] do
+				[from, to].map do |storage|
+					Thread.new do
+						files[storage] = storage.files
+					end
+				end.each &:join
+			end
 		
+			progress = ProgressBar["- prepare add_files (check #{files[from].n} files)", total: files[from].n]
 			add_files =
 				files[from].reject do |file|
 					# skip if such file exists
-					if found_file=files[to].find_by(name:file.name)
+					res = if found_file=files[to].find_by(name:file.name)
 						#. *on clouds mtime is not the original so we cannot rely on it
 						#  maybe we should have some mtime_preserved flag for storage
 						# found_file.mtime == file.mtime
@@ -45,12 +48,17 @@ class Storage
 						# 19.09.22 trying to use checksum (found that GDrive supports this) — may be unsupported by other storages
 						found_file.md5_checksum == file.md5_checksum
 					end
+					progress.inc
+					res
 				end
 			add_files.sort_by! &:name
+			progress = ProgressBar["- prepare del_files (check #{files[to].n} files)", total: files[to].n]
 			del_files =
 				files[to].reject do |file|
 					# skip if such file should exist
-					files[from].find_by(name:file.name)
+					files[from].find_by(name:file.name).tap do
+						progress.inc
+					end
 				end
 			# *delete first to free up storage and to define a storage_dir, set_dir
 			to.del_many del_files
@@ -58,10 +66,11 @@ class Storage
 			# *'z_tmp_sync' added to Shared.skip_root_nodes
 			# *we do not use tmp files if reading from LocalFS
 			tmp_dir = from.is_a?(LocalFS) ? nil : IDir.new(:z_tmp_sync).create   # dir is usually created in the project local dir
+			progress = ProgressBar["- copy (#{add_files.n})", total: add_files.n]
 			process_file = -> (add_file) do
 				file = from.get(add_file.name, to:tmp_dir)
 				to.add_update file
-				print '.'
+				progress.inc
 			end
 			if from.is_a? Storage
 				from.do_in_parallel tasks:add_files, &process_file
@@ -154,9 +163,10 @@ class Storage
 		fail 'NotImplemented'
 	end
 	def del_many(files)
+		progress = ProgressBar["- del_many (#{files.n})", total:files.n]
 		do_in_parallel(tasks:files) do |file|
 			del file.name
-			print '.'
+			progress.inc
 		end
 	end
 
@@ -257,7 +267,7 @@ class Storage::LocalFS < Storage
 			end
 		end
 	end
-
+																																							#~ LocalFS
 	def del(name)
 		target_dir.files
 			.find {|_| _.name == name }
@@ -265,15 +275,19 @@ class Storage::LocalFS < Storage
 	end
 	def del_many(files)
 		# *not in parallel
+		progress = ProgressBar["- del_many (#{files.n})", total:files.n]
 		files.each do |_|
 			del _.name
-			print '.'
+			progress.inc
 		end
 	end
 
 	def nodes(only_files:nil)
 		if only_files
-			target_dir.files
+			target_dir.files.each do |_|
+				_.extend IFileExt
+				_.storage = self
+			end
 		else
 			target_dir.children
 		end
@@ -298,7 +312,38 @@ class Storage::LocalFS < Storage
 		storage_dir.del!
 		super
 	end
+
+	# *db is already used in Array
+	def dir_db
+		@dir_db ||= DirDB.new(dir:@target_dir, save_at_exit:1)
+	end
+
+	module IFileExt
+		def storage=(storage)
+			@storage = storage
+		end
+
+		# (mod) add cache
+		def md5_checksum
+			mtime_i = mtime.to_i
+			# (<!) return cached md5 if available
+			if d=@storage.dir_db.md5_cache[name]
+				return d.md5 if d.mtime_i == mtime_i
+			end
+			# cache and return
+			super.tap do |md5|
+				@storage.dir_db.md5_cache[name] = {md5:md5, mtime_i:mtime_i}
+			end
+		end
+
+		# (mod) rem cache
+		def del!
+			@storage.dir_db.md5_cache.delete name
+			super
+		end
+	end
 end
+
 																																							#~ LocalFS/
 
 
